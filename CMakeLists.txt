@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(loopSkip)
+project(loop_fn_Fault)
 set(LLVM_DIR "/usr/lib/llvm-20/lib/cmake/llvm")
 
 find_package(LLVM REQUIRED CONFIG)
@@ -24,7 +24,7 @@ if(NOT Z3_FOUND)
   endif()
 endif()
 
-add_executable(loopSkip loopSkip.cpp)
+add_executable(loop_fn_Fault loop_fn_Fault.cpp)
 add_executable(smt_parser3 smt_parser2.cpp)
 
 # Map needed LLVM components to library names
@@ -39,7 +39,7 @@ llvm_map_components_to_libnames(LLVM_LIBS
 # --------------------
 # Link libraries
 # --------------------
-target_link_libraries(loopSkip
+target_link_libraries(loop_fn_Fault
   PRIVATE
   ${LLVM_LIBS}
 )

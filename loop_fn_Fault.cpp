@@ -43,6 +43,7 @@
 
 #include <map>
 #include <memory>
+#include <utility>
 #include <vector>
 
 using namespace llvm;
@@ -50,7 +51,11 @@ using namespace llvm;
 enum FaultMode { LOOP_SKIP = 0, FUNC_SKIP = 1 };
 
 class FuncSkip : public PassInfoMixin<FuncSkip> {
+private:
+  std::string funcToSkip;
+
 public:
+  FuncSkip(std::string func) : funcToSkip(std::move(func)) {}
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
     auto &LI = FAM.getResult<LoopAnalysis>(F);
     auto &SE = FAM.getResult<ScalarEvolutionAnalysis>(F);
@@ -64,7 +69,7 @@ public:
       }
 
       errs() << "Loop trip count: " << tripCount << "\n";
-      addLabelNUnrollWithFuncSkip(F, L, LI, SE, tripCount, "add_f");
+      addLabelNUnrollWithFuncSkip(F, L, LI, SE, tripCount, funcToSkip);
     }
     return PreservedAnalyses::none();
   }
@@ -753,7 +758,7 @@ void cleanup(Module &M) {
 }
 int main(int argc, char **argv) {
   if (argc < 3) {
-    errs() << "Usage: loopSkip <input.ll> <mode> [funcName]\n";
+    errs() << "Usage: loopSkip <input.ll> <mode> [funcName] [funcToSkip]\n";
     errs() << "0 => loopSkip\n";
     errs() << "1 => funcSkip\n";
     return 1;
@@ -762,21 +767,37 @@ int main(int argc, char **argv) {
   std::string inputFile = argv[1];
   int mode = std::stoi(argv[2]);
   std::string funcName = "main";
-  if (argc >= 4) {
+  std::string funcToSkip = "";
+  if (argc >= 5) {
     funcName = argv[3];
+    funcToSkip = argv[4];
   }
-
   LLVMContext ctx;
   SMDiagnostic err;
   auto module = parseIRFile(inputFile, err, ctx);
   if (!module) {
-    err.print("error", errs());
+    err.print("Input File not found", errs());
+    errs() << "Usage: loopSkip <input.ll> <mode> [funcName] [funcToSkip]\n";
+    errs() << "0 => loopSkip\n";
+    errs() << "1 => funcSkip\n";
     return 1;
   }
 
   Function *target = module->getFunction(funcName);
   if (!target) {
-    std::cout << "Function not found: " << funcName << std::endl;
+    std::cout << "Target Function not found: " << funcName << std::endl;
+    errs() << "Usage: loopSkip <input.ll> <mode> [funcName] [funcToSkip]\n";
+    errs() << "0 => loopSkip\n";
+    errs() << "1 => funcSkip\n";
+    return 1;
+  }
+
+  Function *skipTarget = module->getFunction(funcToSkip);
+  if (!skipTarget) {
+    std::cout << "Function to Skip not found: " << funcToSkip << std::endl;
+    errs() << "Usage: ./loop_fn_Fault <input.ll> <mode> [funcName] [funcToSkip]\n";
+    errs() << "0 => loopSkip\n";
+    errs() << "1 => funcSkip\n";
     return 1;
   }
 
@@ -1011,14 +1032,14 @@ int main(int argc, char **argv) {
         F.addFnAttr(Attribute::InlineHint);
     }
 
-    makePB(*preUnrollClone, [](ModulePassManager &MPM) {
+    makePB(*preUnrollClone, [&funcToSkip](ModulePassManager &MPM) {
       {
         FunctionPassManager FPM;
         FPM.addPass(LoopSimplifyPass());
         FPM.addPass(LCSSAPass());
         FPM.addPass(createFunctionToLoopPassAdaptor(LoopRotatePass()));
         FPM.addPass(createFunctionToLoopPassAdaptor(IndVarSimplifyPass()));
-        FPM.addPass(FuncSkip());
+        FPM.addPass(FuncSkip(funcToSkip));
         FPM.addPass(SCCPPass());
         FPM.addPass(PromotePass());
         MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
