@@ -1,0 +1,34 @@
+# CMake & testing
+/build*
+/tmp*
+build/
+build32/
+build64/
+/llvm-apps/fault-prop/llvmbmc
+llvmbmc
+doc/*.html
+doc/doc.css
+.z3-trace
+
+# MSVC
+.vs
+/out*
+.vscode
+
+# Text editors and IDES
+.idea
+tags
+*.swp
+*.pyc
+*.swo
+*~
+.tags*
+
+# CLion
+/cmake-build*
+
+# Misc
+__pycache__
+.pytest_cache
+.cache
+.CMake/a.out
