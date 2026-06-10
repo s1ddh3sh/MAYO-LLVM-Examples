@@ -2,6 +2,7 @@
 /build*
 /tmp*
 build/
+results
 build32/
 build64/
 /llvm-apps/fault-prop/llvmbmc

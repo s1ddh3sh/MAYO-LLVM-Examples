@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(loop_fn_Fault)
+project(mayo_pass)
 set(LLVM_DIR "/usr/lib/llvm-20/lib/cmake/llvm")
 
 find_package(LLVM REQUIRED CONFIG)
@@ -24,8 +24,8 @@ if(NOT Z3_FOUND)
   endif()
 endif()
 
-add_executable(loop_fn_Fault fault_types/loop_fn_Fault.cpp)
-add_executable(smt_parser3 smt_parser2.cpp)
+add_executable(mayo_pass mayo_pass.cpp)
+# add_executable(smt_parser3 smt_parser2.cpp)
 
 # Map needed LLVM components to library names
 llvm_map_components_to_libnames(LLVM_LIBS
@@ -39,17 +39,17 @@ llvm_map_components_to_libnames(LLVM_LIBS
 # --------------------
 # Link libraries
 # --------------------
-target_link_libraries(loop_fn_Fault
+target_link_libraries(mayo_pass
   PRIVATE
   ${LLVM_LIBS}
 )
 
-target_link_libraries(smt_parser3
-  PRIVATE
-  ${Z3_LIBRARIES}
-)
+# target_link_libraries(smt_parser3
+#   PRIVATE
+#   ${Z3_LIBRARIES}
+# )
 
-target_include_directories(smt_parser3
-  PRIVATE
-  ${Z3_INCLUDE_DIRS}
-)
+# target_include_directories(smt_parser3
+#   PRIVATE
+#   ${Z3_INCLUDE_DIRS}
+# )

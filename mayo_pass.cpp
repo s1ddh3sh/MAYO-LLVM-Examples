@@ -8,6 +8,7 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
@@ -50,200 +51,6 @@
 #include <vector>
 
 using namespace llvm;
-
-enum FaultMode { LOOP_SKIP = 0, FUNC_SKIP = 1 };
-
-class FuncSkip : public PassInfoMixin<FuncSkip> {
-private:
-  std::string funcToSkip;
-
-public:
-  FuncSkip(std::string func) : funcToSkip(std::move(func)) {}
-  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
-    auto &LI = FAM.getResult<LoopAnalysis>(F);
-    auto &SE = FAM.getResult<ScalarEvolutionAnalysis>(F);
-
-    std::vector<Loop *> loops(LI.begin(), LI.end());
-    for (Loop *L : loops) {
-      unsigned tripCount = SE.getSmallConstantTripCount(L);
-      if (tripCount == 0) {
-        errs() << "cannot determine trip count\n";
-        continue;
-      }
-
-      errs() << "Loop trip count: " << tripCount << "\n";
-      addLabelNUnrollWithFuncSkip(F, L, LI, SE, tripCount, funcToSkip);
-    }
-    return PreservedAnalyses::none();
-  }
-
-  void addLabelNUnrollWithFuncSkip(Function &F, Loop *L, LoopInfo &LI,
-                                   ScalarEvolution &SE, unsigned tripCount,
-                                   const std::string &funcToSkip) {
-    BasicBlock *header = L->getHeader();
-    BasicBlock *latch = L->getLoopLatch();
-    BasicBlock *preheader = L->getLoopPreheader();
-    BasicBlock *exitBB = L->getUniqueExitBlock();
-
-    if (!header || !latch || !preheader || !exitBB) {
-      errs() << "Loop not in simplified form\n";
-      return;
-    }
-
-    std::vector<BasicBlock *> origBlocks;
-    for (BasicBlock *BB : L->blocks()) {
-      origBlocks.push_back(BB);
-    }
-
-    BasicBlock *prevIterExit = preheader;
-    ValueToValueMapTy cumulativeMap;
-
-    for (unsigned i = 0; i < tripCount; i++) {
-      // 1. Create start label
-      BasicBlock *iterStart = BasicBlock::Create(
-          F.getContext(), "iter_" + std::to_string(i) + "_start", &F);
-
-      // 2. Resolve PHI nodes for this iteration
-      std::vector<std::pair<PHINode *, Value *>> resolvedPhis;
-      for (PHINode &PN : header->phis()) {
-        Value *incoming;
-        if (i == 0) {
-          incoming = PN.getIncomingValueForBlock(preheader);
-        } else {
-          Value *latchVal = PN.getIncomingValueForBlock(latch);
-          if (Value *mapped = cumulativeMap.lookup(latchVal))
-            incoming = mapped;
-          else
-            incoming = latchVal;
-        }
-        cumulativeMap[&PN] = incoming;
-        resolvedPhis.push_back({&PN, incoming});
-      }
-
-      // 3. Clone all blocks for this iteration
-      std::vector<BasicBlock *> iterationCloned;
-      ValueToValueMapTy iterationBlockMap;
-      for (BasicBlock *BB : origBlocks) {
-        BasicBlock *cloned =
-            CloneBasicBlock(BB, cumulativeMap, ".iter" + std::to_string(i), &F);
-        iterationCloned.push_back(cloned);
-        iterationBlockMap[BB] = cloned;
-
-        // Map individual instructions to their clones
-        auto itOrig = BB->begin();
-        auto itCloned = cloned->begin();
-        while (itOrig != BB->end() && itCloned != cloned->end()) {
-          iterationBlockMap[&*itOrig] = &*itCloned;
-          // For next iteration's use
-          cumulativeMap[&*itOrig] = &*itCloned;
-          itOrig++;
-          itCloned++;
-        }
-      }
-
-      // 4. Resolve internal control flow in the cloned iteration
-      for (BasicBlock *cloned : iterationCloned) {
-        for (Instruction &I : *cloned) {
-          RemapInstruction(&I, iterationBlockMap,
-                           RF_NoModuleLevelChanges | RF_IgnoreMissingLocals);
-        }
-
-        // Skip function calls in the first iteration
-        if (i == 0) {
-          for (auto It = cloned->begin(); It != cloned->end();) {
-            Instruction *I = &*It++;
-            auto *CI = dyn_cast<CallInst>(I);
-            if (!CI)
-              continue;
-
-            Function *callee = CI->getCalledFunction();
-            if (callee && callee->getName() == funcToSkip) {
-              outs() << "skipping fn call " << callee->getName() << "\n";
-              // if (!CI->getType()->isVoidTy()) {
-              Value *v = CI->getArgOperand(0);
-              // Value *v = Constant::getNullValue(CI->getType());
-              CI->replaceAllUsesWith(v);
-              // }
-              CI->eraseFromParent();
-            }
-          }
-        }
-      }
-
-      // 5. Remove PHI nodes from the cloned header as they are now resolved
-      for (auto &pair : resolvedPhis) {
-        PHINode *origPhi = pair.first;
-        Value *resolvedVal = pair.second;
-        if (Value *clonedPhiVal = iterationBlockMap.lookup(origPhi)) {
-          PHINode *clonedPhi = cast<PHINode>(clonedPhiVal);
-          clonedPhi->replaceAllUsesWith(resolvedVal);
-          clonedPhi->eraseFromParent();
-        }
-      }
-
-      // 6. Create end label
-      BasicBlock *iterEnd = BasicBlock::Create(
-          F.getContext(), "iter_" + std::to_string(i) + "_end", &F);
-
-      // 7. Connect control flow
-      if (i == 0) {
-        Instruction *prevTerm = preheader->getTerminator();
-        BranchInst::Create(iterStart, preheader);
-        prevTerm->eraseFromParent();
-      } else {
-        BranchInst::Create(iterStart, prevIterExit);
-      }
-
-      BranchInst::Create(iterationCloned.front(), iterStart);
-
-      BasicBlock *clonedLatch = cast<BasicBlock>(iterationBlockMap[latch]);
-      Instruction *latchTerm = clonedLatch->getTerminator();
-      BranchInst::Create(iterEnd, clonedLatch);
-      latchTerm->eraseFromParent();
-
-      prevIterExit = iterEnd;
-    }
-
-    BranchInst::Create(exitBB, prevIterExit);
-    for (auto it = exitBB->begin(); isa<PHINode>(it);) {
-      PHINode *PN = cast<PHINode>(&*it++);
-      Value *incomingVal = nullptr;
-
-      for (unsigned j = 0; j < PN->getNumIncomingValues(); j++) {
-        if (L->contains(PN->getIncomingBlock(j))) {
-          incomingVal = PN->getIncomingValue(j);
-          break;
-        }
-      }
-
-      if (!incomingVal)
-        continue;
-
-      if (Value *mapped = cumulativeMap.lookup(incomingVal))
-        incomingVal = mapped;
-
-      while (true) {
-        bool removed = false;
-        for (unsigned j = 0; j < PN->getNumIncomingValues(); j++) {
-          if (L->contains(PN->getIncomingBlock(j))) {
-            PN->removeIncomingValue(j, false);
-            removed = true;
-            break;
-          }
-        }
-        if (!removed)
-          break;
-      }
-
-      PN->addIncoming(incomingVal, prevIterExit);
-    }
-
-    for (BasicBlock *BB : origBlocks) {
-      BB->eraseFromParent();
-    }
-  }
-};
-
 void run_command(const std::string &cmd) {
   int ret = system(cmd.c_str());
   if (ret != 0) {
@@ -279,35 +86,154 @@ void dump_module(llvm::Module &M, const std::string &filename) {
 /// Trace a value backwards to its original AllocaInst, GlobalVariable, or
 /// Constant.
 Value *traceArgToRoot(Value *V) {
-  std::set<Value *> visited;
-  while (V && visited.insert(V).second) {
+  std::set<Value *> Visited;
+
+  while (V && Visited.insert(V).second) {
+
+    // Already a constant
+    if (isa<Constant>(V))
+      return V;
+
+    // GEP
     if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
       V = GEP->getPointerOperand();
-    } else if (auto *BC = dyn_cast<BitCastInst>(V)) {
+      continue;
+    }
+
+    // Bitcast
+    if (auto *BC = dyn_cast<BitCastInst>(V)) {
       V = BC->getOperand(0);
-    } else if (auto *Arg = dyn_cast<Argument>(V)) {
+      continue;
+    }
+
+    // Casts
+    if (auto *CI = dyn_cast<CastInst>(V)) {
+      V = CI->getOperand(0);
+      continue;
+    }
+
+    // Argument -> caller argument
+    if (auto *Arg = dyn_cast<Argument>(V)) {
       Function *F = Arg->getParent();
-      bool foundCall = false;
+
+      bool FoundCall = false;
+
       for (User *U : F->users()) {
-        if (auto *CB = dyn_cast<CallBase>(U)) {
-          if (CB->getCalledFunction() == F) {
-            V = CB->getArgOperand(Arg->getArgNo());
-            foundCall = true;
-            break; // Just pick the first call site
+        auto *CB = dyn_cast<CallBase>(U);
+        if (!CB)
+          continue;
+
+        if (CB->getCalledFunction() != F)
+          continue;
+
+        V = CB->getArgOperand(Arg->getArgNo());
+        FoundCall = true;
+        break;
+      }
+
+      if (!FoundCall)
+        return V;
+
+      continue;
+    }
+
+    // Try constant-folding instructions
+    if (auto *I = dyn_cast<Instruction>(V)) {
+
+      if (Constant *C =
+              ConstantFoldInstruction(I, I->getModule()->getDataLayout()))
+        return C;
+
+      // Handle binary ops manually
+      if (auto *BO = dyn_cast<BinaryOperator>(I)) {
+
+        Value *L = traceArgToRoot(BO->getOperand(0));
+        Value *R = traceArgToRoot(BO->getOperand(1));
+
+        auto *LC = dyn_cast<ConstantInt>(L);
+        auto *RC = dyn_cast<ConstantInt>(R);
+
+        if (LC && RC) {
+
+          APInt LV = LC->getValue();
+          APInt RV = RC->getValue();
+
+          switch (BO->getOpcode()) {
+
+          case Instruction::Add:
+            return ConstantInt::get(I->getType(), LV + RV);
+
+          case Instruction::Sub:
+            return ConstantInt::get(I->getType(), LV - RV);
+
+          case Instruction::Mul:
+            return ConstantInt::get(I->getType(), LV * RV);
+
+          case Instruction::UDiv:
+            if (!RV.isZero())
+              return ConstantInt::get(I->getType(), LV.udiv(RV));
+            break;
+
+          case Instruction::SDiv:
+            if (!RV.isZero())
+              return ConstantInt::get(I->getType(), LV.sdiv(RV));
+            break;
+
+          default:
+            break;
           }
         }
       }
-      if (!foundCall)
-        break;
-    } else if (auto *LI = dyn_cast<LoadInst>(V)) {
-      break;
-    } else {
-      break;
+
+      // PHI with same incoming constant
+      if (auto *PN = dyn_cast<PHINode>(I)) {
+
+        Constant *First = nullptr;
+        bool Same = true;
+
+        for (unsigned i = 0; i < PN->getNumIncomingValues(); i++) {
+
+          Value *Root = traceArgToRoot(PN->getIncomingValue(i));
+
+          auto *C = dyn_cast<Constant>(Root);
+
+          if (!C) {
+            Same = false;
+            break;
+          }
+
+          if (!First)
+            First = C;
+          else if (First != C) {
+            Same = false;
+            break;
+          }
+        }
+
+        if (Same && First)
+          return First;
+      }
+
+      // Select with constant condition
+      if (auto *SI = dyn_cast<SelectInst>(I)) {
+
+        Value *Cond = traceArgToRoot(SI->getCondition());
+
+        if (auto *CC = dyn_cast<ConstantInt>(Cond)) {
+
+          if (CC->isZero())
+            return traceArgToRoot(SI->getFalseValue());
+
+          return traceArgToRoot(SI->getTrueValue());
+        }
+      }
     }
+
+    return V;
   }
+
   return V;
 }
-
 unsigned inferPointerAllocSize(Argument *arg, unsigned defaultSize) {
   unsigned maxOffset = 0;
   bool foundGEP = false;
@@ -401,9 +327,9 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
           builder.CreateMemSet(newAlloc, builder.getInt8(0), allocSize,
                                Align(1));
           ptr = builder.CreateBitCast(newAlloc, argTy);
-          errs() << "  Arg " << i << " (" << arg->getName()
-                 << "): alloca of type " << *allocTy << " named " << name
-                 << "\n";
+          // errs() << "  Arg " << i << " (" << arg->getName()
+          //        << "): alloca of type " << *allocTy << " named " << name
+          //        << "\n";
         } else if (auto *GV = dyn_cast<GlobalVariable>(root)) {
           Type *valTy = GV->getValueType();
           std::string name = GV->getName().str();
@@ -416,8 +342,8 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
           builder.CreateMemSet(newAlloc, builder.getInt8(0), allocSize,
                                Align(1));
           ptr = builder.CreateBitCast(newAlloc, argTy);
-          errs() << "  Arg " << i << " (" << arg->getName()
-                 << "): global of type " << *valTy << " named " << name << "\n";
+          // errs() << "  Arg " << i << " (" << arg->getName()
+          //        << "): global of type " << *valTy << " named " << name << "\n";
         }
       }
 
@@ -429,8 +355,8 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
         alloc->setAlignment(Align(16));
         builder.CreateMemSet(alloc, builder.getInt8(0), allocSize, Align(1));
         ptr = builder.CreateBitCast(alloc, argTy);
-        errs() << "  Arg " << i << " (" << arg->getName()
-               << "): fallback -> alloca [" << allocSize << " x i8]\n";
+        // errs() << "  Arg " << i << " (" << arg->getName()
+        //        << "): fallback -> alloca [" << allocSize << " x i8]\n";
       }
       callArgs.push_back(ptr);
 
@@ -438,16 +364,16 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
       if (root && isa<ConstantInt>(root)) {
         ConstantInt *CI = cast<ConstantInt>(root);
         callArgs.push_back(ConstantInt::get(argTy, CI->getZExtValue()));
-        errs() << "  Arg " << i << " (" << arg->getName() << "): constant "
-               << CI->getZExtValue() << "\n";
+        // errs() << "  Arg " << i << " (" << arg->getName() << "): constant "
+        //        << CI->getZExtValue() << "\n";
       } else {
         callArgs.push_back(ConstantInt::get(argTy, 0));
-        errs() << "  Arg " << i << " (" << arg->getName() << "): default 0\n";
+        // errs() << "  Arg " << i << " (" << arg->getName() << "): default 0\n";
       }
     } else {
       callArgs.push_back(Constant::getNullValue(argTy));
-      errs() << "  Arg " << i << " (" << arg->getName()
-             << "): unknown type -> null\n";
+      // errs() << "  Arg " << i << " (" << arg->getName()
+      //        << "): unknown type -> null\n";
     }
   }
 
@@ -778,47 +704,28 @@ void cleanup(Module &M) {
 }
 int main(int argc, char **argv) {
   if (argc < 3) {
-    errs() << "Usage: loopSkip <input.ll> <mode> [funcName] [funcToSkip]\n";
-    errs() << "0 => loopSkip\n";
-    errs() << "1 => funcSkip\n";
+    errs() << "Usage: ./mayo_pass <input.ll> [funcName]\n";
     return 1;
   }
 
   std::string inputFile = argv[1];
-  int mode = std::stoi(argv[2]);
-  std::string funcName = "main";
-  std::string funcToSkip = "";
-  if (argc >= 5) {
-    funcName = argv[3];
-    funcToSkip = argv[4];
-  }
+  std::string funcName = argv[2];
+
   LLVMContext ctx;
   SMDiagnostic err;
   auto module = parseIRFile(inputFile, err, ctx);
   if (!module) {
     err.print("Input File not found", errs());
-    errs() << "Usage: loopSkip <input.ll> <mode> [funcName] [funcToSkip]\n";
-    errs() << "0 => loopSkip\n";
-    errs() << "1 => funcSkip\n";
+    errs() << "Usage: ./mayo_pass <input.ll> [funcName]\n";
+
     return 1;
   }
 
   Function *target = module->getFunction(funcName);
   if (!target) {
     std::cout << "Target Function not found: " << funcName << std::endl;
-    errs() << "Usage: loopSkip <input.ll> <mode> [funcName] [funcToSkip]\n";
-    errs() << "0 => loopSkip\n";
-    errs() << "1 => funcSkip\n";
-    return 1;
-  }
+    errs() << "Usage: ./mayo_pass <input.ll> [funcName]\n";
 
-  Function *skipTarget = module->getFunction(funcToSkip);
-  if (!skipTarget && mode == FUNC_SKIP) {
-    std::cout << "Function to Skip not found: " << funcToSkip << std::endl;
-    errs()
-        << "Usage: ./loop_fn_Fault <input.ll> <mode> [funcName] [funcToSkip]\n";
-    errs() << "0 => loopSkip\n";
-    errs() << "1 => funcSkip\n";
     return 1;
   }
 
@@ -834,7 +741,7 @@ int main(int argc, char **argv) {
   {
     Function *extractedFunc = funcModule->getFunction(funcName);
     if (extractedFunc) {
-      errs() << "Creating driver function for " << funcName << "...\n";
+      // errs() << "Creating driver function for " << funcName << "...\n";
       createDynamicDriverFunction(*module, *funcModule, extractedFunc);
     }
   }
@@ -855,11 +762,6 @@ int main(int argc, char **argv) {
     buildPipeline(MPM);
     MPM.run(M, MAM);
   };
-
-  std::unique_ptr<Module> preUnrollClone;
-  if (mode == FUNC_SKIP) {
-    preUnrollClone = CloneModule(*funcModule);
-  }
 
   // Unroll for original.ll
   for (Function &F : *funcModule) {
@@ -892,7 +794,7 @@ int main(int argc, char **argv) {
       FPM.addPass(LCSSAPass());
       FPM.addPass(createFunctionToLoopPassAdaptor(LoopRotatePass()));
       FPM.addPass(createFunctionToLoopPassAdaptor(IndVarSimplifyPass()));
-      FPM.addPass(LabeledUnrollPass());
+      // FPM.addPass(LabeledUnrollPass());
       FPM.addPass(SCCPPass());
       FPM.addPass(PromotePass());
       MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
@@ -933,187 +835,9 @@ int main(int argc, char **argv) {
     errs() << "Invalid IR after LabeledUnrollPass\n";
     return 1;
   }
-
-  dump_module(*funcModule, "../results/original.ll");
-  outs() << "Wrote original.ll\n";
-
-  // Clone and inject fault
-
-  if (mode == LOOP_SKIP) {
-    auto faultModule = CloneModule(*funcModule);
-
-    unsigned skipIter = 1;
-    Function *faultFunc = faultModule->getFunction(funcName);
-    if (faultFunc) {
-      std::string srcName = "iter_" + std::to_string(skipIter - 1) + "_end";
-      std::string newTarget = "iter_" + std::to_string(skipIter + 1) + "_start";
-      std::string skippedSuffix = ".iter" + std::to_string(skipIter);
-      std::string prevSuffix = ".iter" + std::to_string(skipIter - 1);
-
-      std::string skipStartName = "iter_" + std::to_string(skipIter) + "_start";
-      std::string skipEndName = "iter_" + std::to_string(skipIter) + "_end";
-
-      std::vector<BasicBlock *> skippedBlocks;
-      BasicBlock *srcBB = nullptr, *newTargetBB = nullptr;
-      bool inSkipped = false;
-
-      for (BasicBlock &BB : *faultFunc) {
-        if (BB.getName() == srcName)
-          srcBB = &BB;
-        if (BB.getName() == newTarget)
-          newTargetBB = &BB;
-        if (BB.getName() == skipStartName)
-          inSkipped = true;
-        if (inSkipped)
-          skippedBlocks.push_back(&BB);
-        if (BB.getName() == skipEndName)
-          inSkipped = false;
-      }
-
-      if (srcBB && newTargetBB) {
-
-        std::map<Value *, Value *> remap;
-        for (BasicBlock *BB : skippedBlocks) {
-          for (Instruction &I : *BB) {
-            std::string iName = I.getName().str();
-            if (iName.empty())
-              continue;
-
-            size_t pos = iName.rfind(skippedSuffix);
-            if (pos == std::string::npos)
-              continue;
-
-            std::string prevName = iName.substr(0, pos) + prevSuffix;
-            for (BasicBlock &searchBB : *faultFunc) {
-              for (Instruction &searchI : searchBB) {
-                if (searchI.getName() == prevName) {
-                  remap[&I] = &searchI;
-                  break;
-                }
-              }
-              if (remap.count(&I))
-                break;
-            }
-          }
-        }
-
-        // Replace uses of skipped-iteration values outside the skipped blocks
-        for (auto &[skippedVal, prevVal] : remap) {
-          std::vector<Use *> usesToReplace;
-          for (Use &U : skippedVal->uses()) {
-            Instruction *user = dyn_cast<Instruction>(U.getUser());
-            if (!user)
-              continue;
-            BasicBlock *userBB = user->getParent();
-            bool isInSkipped = false;
-            for (BasicBlock *sBB : skippedBlocks) {
-              if (sBB == userBB) {
-                isInSkipped = true;
-                break;
-              }
-            }
-            if (!isInSkipped)
-              usesToReplace.push_back(&U);
-          }
-          for (Use *U : usesToReplace)
-            U->set(prevVal);
-        }
-
-        // Redirect the branch from iter_(N-1)_end to iter_(N+1)_start
-        Instruction *term = srcBB->getTerminator();
-        if (auto *br = dyn_cast<BranchInst>(term)) {
-          BranchInst::Create(newTargetBB, srcBB);
-          br->eraseFromParent();
-          outs() << "Fault injected: " << srcName << " -> " << newTarget
-                 << " (skipping iteration " << skipIter << ")\n";
-        }
-
-        for (BasicBlock *BB : skippedBlocks)
-          BB->dropAllReferences();
-        for (BasicBlock *BB : skippedBlocks)
-          BB->eraseFromParent();
-
-      } else {
-        errs() << "Could not find blocks for fault injection\n";
-      }
-    }
-
-    if (verifyModule(*faultModule, &errs())) {
-      errs() << "Fault module has invalid IR\n";
-    } else {
-      dump_module(*faultModule, "../results/loopOrFuncSkip/loopSkip.ll");
-      outs() << "Wrote loopSkip.ll\n";
-    }
-
-  } else if (mode == FUNC_SKIP) {
-    for (Function &F : *preUnrollClone) {
-      F.removeFnAttr(Attribute::NoInline);
-      F.removeFnAttr(Attribute::OptimizeNone);
-      if (!F.isDeclaration())
-        F.addFnAttr(Attribute::InlineHint);
-    }
-
-    makePB(*preUnrollClone, [&funcToSkip](ModulePassManager &MPM) {
-      {
-        FunctionPassManager FPM;
-        FPM.addPass(LoopSimplifyPass());
-        FPM.addPass(LCSSAPass());
-        FPM.addPass(createFunctionToLoopPassAdaptor(LoopRotatePass()));
-        FPM.addPass(createFunctionToLoopPassAdaptor(IndVarSimplifyPass()));
-        FPM.addPass(FuncSkip(funcToSkip));
-        FPM.addPass(SCCPPass());
-        FPM.addPass(PromotePass());
-        MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
-      }
-
-      {
-        InlineParams IP;
-        IP.DefaultThreshold = 10000;
-        MPM.addPass(ModuleInlinerPass(IP));
-      }
-      MPM.addPass(GlobalOptPass());
-    });
-    replaceMemoryIntrinsics(*preUnrollClone, *module);
-    cleanup(*preUnrollClone);
-    {
-      LoopAnalysisManager LAM;
-      FunctionAnalysisManager FAM;
-      CGSCCAnalysisManager CGAM;
-      ModuleAnalysisManager MAM;
-
-      PassBuilder PB;
-
-      PB.registerModuleAnalyses(MAM);
-      PB.registerCGSCCAnalyses(CGAM);
-      PB.registerFunctionAnalyses(FAM);
-      PB.registerLoopAnalyses(LAM);
-      PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
-
-      ModulePassManager MPM;
-
-      MPM.addPass(GlobalDCEPass());
-
-      FunctionPassManager FPM;
-      FPM.addPass(ADCEPass());
-      FPM.addPass(DCEPass());
-
-      MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
-
-      MPM.run(*preUnrollClone, MAM);
-    }
-    StripDebugInfo(*preUnrollClone);
-    if (verifyModule(*preUnrollClone, &errs())) {
-      errs() << "Fault module has invalid IR\n";
-    } else {
-      dump_module(*preUnrollClone, "../results/loopOrFuncSkip/funcSkip.ll");
-      outs() << "Wrote funcSkip.ll\n";
-    }
-
-  } else {
-    errs() << "Invalid mode. Use 0 or 1\n";
-    return 1;
-  }
-
+  std::string fn = "../results/" + funcName + ".ll";
+  dump_module(*funcModule, fn);
+  outs() << "Wrote IR for " << funcName + "\n";
 
   return 0;
 }
