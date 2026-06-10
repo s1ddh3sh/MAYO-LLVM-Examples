@@ -87,7 +87,7 @@ struct FaultResult {
 };
 enum class FaultModel { Undef, Zero, OpB, OpC };
 
-class SkipAddPass : public PassInfoMixin<SkipAddPass> {
+class SkipBinOpPass : public PassInfoMixin<SkipBinOpPass> {
   FaultModel FM;
   FaultResult *Result;
 
@@ -108,7 +108,7 @@ class SkipAddPass : public PassInfoMixin<SkipAddPass> {
   }
 
 public:
-  explicit SkipAddPass(FaultModel FM = FaultModel::OpB,
+  explicit SkipBinOpPass(FaultModel FM = FaultModel::OpB,
                        FaultResult *Result = nullptr)
       : FM(FM), Result(Result) {}
 
@@ -235,7 +235,7 @@ std::unique_ptr<Module> extractFunction(Module &M, Function *F) {
 int main(int argc, char **argv) {
 
   if (argc < 2) {
-    std::cerr << "Usage: ./fault_prop input.ll\n";
+    std::cerr << "Usage: ./binOpFault <input.ll> <line>\n";
     return 1;
   }
 
@@ -333,7 +333,7 @@ int main(int argc, char **argv) {
   // auto mod = parseIRFile("original.ll", err, ctx);
   // outs() << *funcModule;
 
-  run_command("../llvmbmc ../original.ll --dump-solver-query -f test");
+  run_command("../llvmbmc ../original.ll --dump-solver-query -f main");
   run_command("cp /tmp/test.smt2 ../correct.smt2");
   struct FaultEntry {
     FaultModel model;
@@ -373,7 +373,7 @@ int main(int argc, char **argv) {
     ModulePassManager MPM;
     MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
 
-    MPM.addPass(SkipAddPass(fe.model, &result));
+    MPM.addPass(SkipBinOpPass(fe.model, &result));
     MPM.run(*cloned, MAM);
 
     std::string llFile = std::string("../faulty_") + fe.name + ".ll";
@@ -399,47 +399,6 @@ int main(int argc, char **argv) {
     results.push_back(std::move(result));
   }
 
-  std::cout << "\n";
-  std::cout << "Fault Injection Summary \n";
-
-  for (auto &r : results) {
-    std::cout << " Model   : " << r.modelName;
-    for (size_t i = r.modelName.size(); i < 49; ++i)
-      std::cout << ' ';
-    std::cout << "\n";
-
-    std::cout << " Function: " << r.functionName;
-    for (size_t i = r.functionName.size(); i < 49; ++i)
-      std::cout << ' ';
-    std::cout << "\n";
-
-    std::cout << " Instr   :" << r.originalInstr;
-    // originalInstr already has leading space from LLVM print
-    size_t instrLen = r.originalInstr.size();
-    if (instrLen < 50)
-      for (size_t i = instrLen; i < 50; ++i)
-        std::cout << ' ';
-    std::cout << "\n";
-
-    std::cout << " Replaced: a = " << r.faultyValueDesc;
-    for (size_t i = r.faultyValueDesc.size(); i < 45; ++i)
-      std::cout << ' ';
-    std::cout << "\n";
-
-    std::cout << " Operands: b=" << r.operand0Name << "  c=" << r.operand1Name;
-    size_t opLen = 2 + r.operand0Name.size() + 4 + r.operand1Name.size();
-    for (size_t i = opLen; i < 47; ++i)
-      std::cout << ' ';
-    std::cout << "\n";
-
-    std::cout << "Result  : " << verificationResultStr(r.verification);
-    size_t vrLen = std::string(verificationResultStr(r.verification)).size();
-    for (size_t i = vrLen; i < 49; ++i)
-      std::cout << ' ';
-    std::cout << "\n";
-
-    std::cout << "\n\n";
-  }
 
   return 0;
 }

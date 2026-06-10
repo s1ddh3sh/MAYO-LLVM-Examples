@@ -8,6 +8,8 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/IPO/GlobalOpt.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
@@ -249,11 +251,28 @@ void run_command(const std::string &cmd) {
   }
 }
 
-void dump_module(Module &M, const std::string &filename) {
+void dump_module(llvm::Module &M, const std::string &filename) {
+  // Create parent directories.
+  SmallString<256> path(filename);
+  sys::path::remove_filename(path);
+
+  if (!path.empty()) {
+    if (std::error_code EC = llvm::sys::fs::create_directories(path)) {
+      llvm::errs() << "Failed to create directories: " << EC.message() << "\n";
+      return;
+    }
+  }
+
   std::error_code EC;
-  raw_fd_ostream out(filename, EC);
+  llvm::raw_fd_ostream out(filename, EC);
+
+  if (EC) {
+    llvm::errs() << "Failed to open file '" << filename << "': " << EC.message()
+                 << "\n";
+    return;
+  }
+
   M.print(out, nullptr);
-  out.close();
 }
 
 /// Trace a value backwards to its original AllocaInst, GlobalVariable, or
@@ -795,7 +814,8 @@ int main(int argc, char **argv) {
   Function *skipTarget = module->getFunction(funcToSkip);
   if (!skipTarget) {
     std::cout << "Function to Skip not found: " << funcToSkip << std::endl;
-    errs() << "Usage: ./loop_fn_Fault <input.ll> <mode> [funcName] [funcToSkip]\n";
+    errs()
+        << "Usage: ./loop_fn_Fault <input.ll> <mode> [funcName] [funcToSkip]\n";
     errs() << "0 => loopSkip\n";
     errs() << "1 => funcSkip\n";
     return 1;
@@ -1020,7 +1040,7 @@ int main(int argc, char **argv) {
     if (verifyModule(*faultModule, &errs())) {
       errs() << "Fault module has invalid IR\n";
     } else {
-      dump_module(*faultModule, "../results/loopSkip.ll");
+      dump_module(*faultModule, "../results/loopOrFuncSkip/loopSkip.ll");
       outs() << "Wrote loopSkip.ll\n";
     }
 
@@ -1084,7 +1104,7 @@ int main(int argc, char **argv) {
     if (verifyModule(*preUnrollClone, &errs())) {
       errs() << "Fault module has invalid IR\n";
     } else {
-      dump_module(*preUnrollClone, "../results/funcSkip.ll");
+      dump_module(*preUnrollClone, "../results/loopOrFuncSkip/funcSkip.ll");
       outs() << "Wrote funcSkip.ll\n";
     }
 
@@ -1093,18 +1113,21 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::string bmcCmdCorrect = "../llvmbmc ../results/original.ll --dump-solver-query "
-                              "-f main --var-suffix correct ";
+  std::string bmcCmdCorrect =
+      "../llvmbmc ../results/original.ll --dump-solver-query "
+      "-f main --var-suffix correct ";
   run_command(bmcCmdCorrect);
   run_command("cp /tmp/test.smt2 ../results/smt/correct.smt2");
   if (mode == LOOP_SKIP) {
-    std::string bmcCmdFaulty = "../llvmbmc ../results/loopSkip.ll --dump-solver-query "
-                               "-f main --var-suffix faulty ";
+    std::string bmcCmdFaulty =
+        "../llvmbmc ../results/loopOrFuncSkip/loopSkip.ll --dump-solver-query "
+        "-f main --var-suffix faulty ";
     run_command(bmcCmdFaulty);
     run_command("cp /tmp/test.smt2 ../results/smt/loopSkip.smt2");
   } else {
-    std::string bmcCmdFaulty = "../llvmbmc ../results/funcSkip.ll --dump-solver-query "
-                               "-f main --var-suffix faulty ";
+    std::string bmcCmdFaulty =
+        "../llvmbmc ../results/loopOrFuncSkip/funcSkip.ll --dump-solver-query "
+        "-f main --var-suffix faulty ";
     run_command(bmcCmdFaulty);
     run_command("cp /tmp/test.smt2 ../results/smt/funcSkip.smt2");
   }
