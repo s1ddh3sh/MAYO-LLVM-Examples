@@ -913,7 +913,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  dump_module(*funcModule, "../original.ll");
+  dump_module(*funcModule, "../results/original.ll");
   outs() << "Wrote original.ll\n";
 
   // Clone and inject fault
@@ -1020,7 +1020,7 @@ int main(int argc, char **argv) {
     if (verifyModule(*faultModule, &errs())) {
       errs() << "Fault module has invalid IR\n";
     } else {
-      dump_module(*faultModule, "../loopSkip.ll");
+      dump_module(*faultModule, "../results/loopSkip.ll");
       outs() << "Wrote loopSkip.ll\n";
     }
 
@@ -1084,7 +1084,7 @@ int main(int argc, char **argv) {
     if (verifyModule(*preUnrollClone, &errs())) {
       errs() << "Fault module has invalid IR\n";
     } else {
-      dump_module(*preUnrollClone, "../funcSkip.ll");
+      dump_module(*preUnrollClone, "../results/funcSkip.ll");
       outs() << "Wrote funcSkip.ll\n";
     }
 
@@ -1093,20 +1093,20 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::string bmcCmdCorrect = "../llvmbmc ../original.ll --dump-solver-query "
+  std::string bmcCmdCorrect = "../llvmbmc ../results/original.ll --dump-solver-query "
                               "-f main --var-suffix correct ";
   run_command(bmcCmdCorrect);
-  run_command("cp /tmp/test.smt2 ../correct.smt2");
+  run_command("cp /tmp/test.smt2 ../results/smt/correct.smt2");
   if (mode == LOOP_SKIP) {
-    std::string bmcCmdFaulty = "../llvmbmc ../loopSkip.ll --dump-solver-query "
+    std::string bmcCmdFaulty = "../llvmbmc ../results/loopSkip.ll --dump-solver-query "
                                "-f main --var-suffix faulty ";
     run_command(bmcCmdFaulty);
-    run_command("cp /tmp/test.smt2 ../loopFault.smt2");
+    run_command("cp /tmp/test.smt2 ../results/smt/loopSkip.smt2");
   } else {
-    std::string bmcCmdFaulty = "../llvmbmc ../funcSkip.ll --dump-solver-query "
+    std::string bmcCmdFaulty = "../llvmbmc ../results/funcSkip.ll --dump-solver-query "
                                "-f main --var-suffix faulty ";
     run_command(bmcCmdFaulty);
-    run_command("cp /tmp/test.smt2 ../funcSkip.smt2");
+    run_command("cp /tmp/test.smt2 ../results/smt/funcSkip.smt2");
   }
 
   return 0;

@@ -24,7 +24,7 @@ if(NOT Z3_FOUND)
   endif()
 endif()
 
-add_executable(loop_fn_Fault loop_fn_Fault.cpp)
+add_executable(loop_fn_Fault fault_types/loop_fn_Fault.cpp)
 add_executable(smt_parser3 smt_parser2.cpp)
 
 # Map needed LLVM components to library names
