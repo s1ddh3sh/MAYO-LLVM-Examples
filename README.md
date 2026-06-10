@@ -1,4 +1,4 @@
-## Instructions to use the tool :
+## Instructions to use this code :
 
 ### 1. Create build folder, then
 ```
@@ -7,6 +7,8 @@ cmake .. && make
 ```
 ### 2. Run cmd:
 
+1. Create a `results/` folder in the repo.
+2. Run the cmd to generate the function IR :
 ```
 ./mayo_pass ../mayo_IR/mayo1.ll <targetFn>
 ```
