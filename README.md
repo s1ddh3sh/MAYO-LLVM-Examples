@@ -13,7 +13,7 @@ cmake .. && make
 ./mayo_pass ../mayo_IR/mayo1.ll <targetFn>
 ```
 
-- This generates a `targetFn.ll` which has the `targetFn` function along with a  `main` driver fn having the allocs used.
+3. This generates a `targetFn.ll` which has the `targetFn` function IR.
 
 
 ### 3. The IRs will be generated in the `results/` folder
