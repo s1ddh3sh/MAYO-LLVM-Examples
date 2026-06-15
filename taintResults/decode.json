@@ -1,0 +1,9 @@
+{
+  "1": "  %mdec.addr.0 = phi ptr [ %mdec, %entry ], [ %incdec.ptr5, %for.body ]",
+  "9": "  %incdec.ptr = getelementptr inbounds nuw i8, ptr %mdec.addr.0, i32 1, !dbg !146",
+  "10": "  store i8 %1, ptr %mdec.addr.0, align 1, !dbg !147",
+  "14": "  store i8 %3, ptr %incdec.ptr, align 1, !dbg !150",
+  "15": "  %incdec.ptr5 = getelementptr inbounds nuw i8, ptr %mdec.addr.0, i32 2, !dbg !151",
+  "18": "  %mdec.addr.0.lcssa = phi ptr [ %mdec.addr.0, %for.cond ]",
+  "26": "  store i8 %6, ptr %mdec.addr.0.lcssa, align 1, !dbg !162"
+}

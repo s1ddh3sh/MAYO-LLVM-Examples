@@ -1,0 +1,14 @@
+{
+  "3": "  %O = alloca [624 x i8], align 1",
+  "5": "  call void @mayo_memset(ptr %P3, i8 0, i32 2560), !dbg !182",
+  "10": "  call fastcc void @decode(ptr noundef nonnull %add.ptr6, ptr noundef nonnull %O, i32 noundef 624) #4, !dbg !206",
+  "11": "  call fastcc void @expand_P1_P2(ptr noundef %p, ptr noundef nonnull %P, ptr noundef nonnull %S) #4, !dbg !207",
+  "12": "  call fastcc void @compute_P3(ptr noundef %p, ptr noundef nonnull %P, ptr noundef nonnull %add.ptr, ptr noundef nonnull %O, ptr noundef nonnull %P3) #4, !dbg !208",
+  "13": "  %call11 = call ptr @memcpy(ptr noundef %cpk, ptr noundef nonnull %S, i32 noundef 16) #5, !dbg !209",
+  "14": "  call void @pqmayo_MAYO_1_ref_m_upper(ptr noundef %p, ptr noundef nonnull %P3, ptr noundef nonnull %P3_upper, i32 noundef 8) #4, !dbg !215",
+  "15": "  %add.ptr15 = getelementptr inbounds nuw i8, ptr %cpk, i32 16, !dbg !216",
+  "16": "  call fastcc void @pack_m_vecs(ptr noundef nonnull %P3_upper, ptr noundef nonnull %add.ptr15, i32 noundef 36, i32 noundef 78) #4, !dbg !217",
+  "17": "  call void @mayo_secure_clear(ptr noundef nonnull %O, i32 noundef 624) #4, !dbg !220",
+  "18": "  call void @mayo_secure_clear(ptr noundef nonnull %add.ptr, i32 noundef 24960) #4, !dbg !221",
+  "19": "  call void @mayo_secure_clear(ptr noundef nonnull %P3, i32 noundef 2560) #4, !dbg !222"
+}

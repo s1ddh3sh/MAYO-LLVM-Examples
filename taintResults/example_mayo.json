@@ -1,0 +1,16 @@
+{
+  "3": "  %esk = alloca [18603 x i64], align 8",
+  "8": "  %call = call dereferenceable_or_null(1420) ptr @calloc(i32 noundef 1420, i32 noundef 1) #4, !dbg !169",
+  "12": "  %call3 = call ptr @calloc(i32 noundef %add2, i32 noundef 1) #4, !dbg !187",
+  "13": "  call void @mayo_memcpy(ptr %msg, ptr @__const.example_mayo.msg, i32 32), !dbg !190",
+  "14": "  call void @mayo_memset(ptr %msg2, i8 0, i32 32), !dbg !192",
+  "15": "  %call4 = call i32 @pqmayo_MAYO_1_ref_mayo_keypair(ptr noundef null, ptr noundef %call, ptr noundef %call1) #5, !dbg !193",
+  "16": "  %call5 = call i32 @pqmayo_MAYO_1_ref_mayo_expand_sk(ptr noundef null, ptr noundef %call1, ptr noundef nonnull %esk) #5, !dbg !195",
+  "17": "  %call11 = call i32 @pqmayo_MAYO_1_ref_mayo_expand_pk(ptr noundef null, ptr noundef %call, ptr noundef nonnull %epk) #5, !dbg !196",
+  "19": "  %call17 = call i32 @pqmayo_MAYO_1_ref_mayo_sign(ptr noundef null, ptr noundef %call3, ptr noundef nonnull %smlen, ptr noundef nonnull %msg, i32 noundef %1, ptr noundef %call1) #5, !dbg !198",
+  "21": "  %call23 = call i32 @pqmayo_MAYO_1_ref_mayo_open(ptr noundef null, ptr noundef nonnull %msg2, ptr noundef nonnull %msglen, ptr noundef %call3, i32 noundef %2, ptr noundef %call) #5, !dbg !200",
+  "25": "  %call27 = call i32 @memcmp(ptr noundef nonnull %msg, ptr noundef nonnull %msg2, i32 noundef %3) #6, !dbg !205",
+  "29": "  %call32 = call i32 @pqmayo_MAYO_1_ref_mayo_verify(ptr noundef null, ptr noundef nonnull %msg, i32 noundef %4, ptr noundef %call3, ptr noundef %call) #5, !dbg !207",
+  "33": "  call void @free(ptr noundef %call) #6, !dbg !212",
+  "35": "  call void @free(ptr noundef %call3) #6, !dbg !214"
+}

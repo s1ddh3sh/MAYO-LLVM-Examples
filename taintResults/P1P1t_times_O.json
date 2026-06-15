@@ -1,0 +1,12 @@
+{
+  "19": "  %add.ptr = getelementptr inbounds i8, ptr %P1, i32 %add.ptr.idx, !dbg !201",
+  "22": "  %arrayidx = getelementptr inbounds nuw i8, ptr %O, i32 %add9, !dbg !205",
+  "23": "  %1 = load i8, ptr %arrayidx, align 1, !dbg !205",
+  "27": "  %add.ptr13 = getelementptr inbounds nuw i8, ptr %acc, i32 %add.ptr13.idx, !dbg !208",
+  "28": "  call fastcc void @m_vec_mul_add(i32 noundef 5, ptr noundef %add.ptr, i8 noundef zeroext %1, ptr noundef %add.ptr13) #4, !dbg !209",
+  "30": "  %add.ptr15 = getelementptr inbounds i8, ptr %P1, i32 %add.ptr15.idx, !dbg !210",
+  "33": "  %arrayidx18 = getelementptr inbounds nuw i8, ptr %O, i32 %add17, !dbg !213",
+  "34": "  %2 = load i8, ptr %arrayidx18, align 1, !dbg !213",
+  "38": "  %add.ptr22 = getelementptr inbounds nuw i8, ptr %acc, i32 %add.ptr22.idx, !dbg !216",
+  "39": "  call fastcc void @m_vec_mul_add(i32 noundef 5, ptr noundef %add.ptr15, i8 noundef zeroext %2, ptr noundef %add.ptr22) #4, !dbg !217"
+}

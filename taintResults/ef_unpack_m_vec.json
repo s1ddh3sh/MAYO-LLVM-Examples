@@ -1,0 +1,10 @@
+{
+  "6": "  %arrayidx = getelementptr inbounds nuw i8, ptr %in, i32 %div, !dbg !149",
+  "7": "  %0 = load i8, ptr %arrayidx, align 1, !dbg !149",
+  "8": "  %1 = and i8 %0, 15, !dbg !150",
+  "10": "  store i8 %1, ptr %arrayidx2, align 1, !dbg !152",
+  "12": "  %arrayidx4 = getelementptr inbounds nuw i8, ptr %in, i32 %div3, !dbg !154",
+  "13": "  %2 = load i8, ptr %arrayidx4, align 1, !dbg !154",
+  "14": "  %3 = lshr i8 %2, 4, !dbg !155",
+  "17": "  store i8 %3, ptr %arrayidx7, align 1, !dbg !158"
+}

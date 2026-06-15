@@ -1,0 +1,11 @@
+{
+  "2": "  call fastcc void @br_range_dec32le(ptr noundef nonnull %ivw, i32 noundef 3, ptr noundef %iv) #4, !dbg !142",
+  "23": "  %out.addr.0 = phi ptr [ %out, %entry ], [ %add.ptr21, %while.body ]",
+  "26": "  call fastcc void @aes_ctr4x(ptr noundef %out.addr.0, ptr noundef nonnull %ivw, ptr noundef %rkeys, i32 noundef %nrounds) #4, !dbg !163",
+  "27": "  %add.ptr21 = getelementptr inbounds nuw i8, ptr %out.addr.0, i32 64, !dbg !165",
+  "31": "  %out.addr.0.lcssa = phi ptr [ %out.addr.0, %while.cond ]",
+  "34": "  call fastcc void @aes_ctr4x(ptr noundef nonnull %tmp, ptr noundef nonnull %ivw, ptr noundef %rkeys, i32 noundef %nrounds) #4, !dbg !178",
+  "40": "  %0 = load i8, ptr %arrayidx26, align 1, !dbg !186",
+  "41": "  %arrayidx27 = getelementptr inbounds nuw i8, ptr %out.addr.0.lcssa, i32 %i.0, !dbg !188",
+  "42": "  store i8 %0, ptr %arrayidx27, align 1, !dbg !189"
+}

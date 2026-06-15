@@ -1,0 +1,8 @@
+{
+  "4": "  %add.ptr = getelementptr inbounds nuw i8, ptr %a, i32 %i.0, !dbg !150",
+  "5": "  %0 = load i8, ptr %add.ptr, align 1, !dbg !153",
+  "6": "  %add.ptr6 = getelementptr inbounds nuw i8, ptr %b, i32 %i.0, !dbg !154",
+  "7": "  %1 = load i8, ptr %add.ptr6, align 1, !dbg !155",
+  "8": "  %call = call fastcc zeroext i8 @add_f(i8 noundef zeroext %0, i8 noundef zeroext %1) #4, !dbg !156",
+  "10": "  store i8 %call, ptr %add.ptr9, align 1, !dbg !158"
+}

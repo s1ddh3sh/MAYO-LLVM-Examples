@@ -1,0 +1,11 @@
+{
+  "3": "  %ret.0 = phi i8 [ 0, %entry ], [ %call1, %for.body ], !dbg !133",
+  "4": "  %b.addr.0 = phi ptr [ %b, %entry ], [ %add.ptr, %for.body ]",
+  "8": "  %arrayidx = getelementptr inbounds nuw i8, ptr %a, i32 %i.0, !dbg !146",
+  "9": "  %2 = load i8, ptr %arrayidx, align 1, !dbg !146",
+  "10": "  %3 = load i8, ptr %b.addr.0, align 1, !dbg !148",
+  "11": "  %call = call fastcc zeroext i8 @mul_f.23(i8 noundef zeroext %2, i8 noundef zeroext %3) #4, !dbg !149",
+  "12": "  %call1 = call fastcc zeroext i8 @add_f.25(i8 noundef zeroext %call, i8 noundef zeroext %ret.0) #4, !dbg !150",
+  "14": "  %add.ptr = getelementptr inbounds nuw i8, ptr %b.addr.0, i32 1, !dbg !152",
+  "16": "  %ret.0.lcssa = phi i8 [ %ret.0, %for.cond ], !dbg !133"
+}

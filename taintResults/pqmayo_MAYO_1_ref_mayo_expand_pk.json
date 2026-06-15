@@ -1,0 +1,5 @@
+{
+  "0": "  call fastcc void @expand_P1_P2(ptr noundef %p, ptr noundef %pk, ptr noundef %cpk) #4, !dbg !166",
+  "1": "  %add.ptr = getelementptr inbounds nuw i8, ptr %cpk, i32 16, !dbg !167",
+  "3": "  call fastcc void @unpack_m_vecs(ptr noundef nonnull %add.ptr, ptr noundef nonnull %add.ptr2, i32 noundef 36, i32 noundef 78) #4, !dbg !169"
+}

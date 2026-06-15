@@ -1,0 +1,14 @@
+{
+  "5": "  %arrayidx = getelementptr inbounds nuw i8, ptr %in, i32 %i.0, !dbg !145",
+  "6": "  %0 = load i8, ptr %arrayidx, align 1, !dbg !145",
+  "8": "  %arrayidx3 = getelementptr inbounds nuw i8, ptr %in, i32 %add2, !dbg !148",
+  "9": "  %1 = load i8, ptr %arrayidx3, align 1, !dbg !148",
+  "10": "  %shl5 = shl i8 %1, 4, !dbg !149",
+  "11": "  %or = or i8 %shl5, %0, !dbg !150",
+  "13": "  %arrayidx7 = getelementptr inbounds nuw i8, ptr %out, i32 %div, !dbg !152",
+  "14": "  store i8 %or, ptr %arrayidx7, align 1, !dbg !153",
+  "21": "  %arrayidx12 = getelementptr inbounds nuw i8, ptr %in, i32 %i.0.lcssa, !dbg !161",
+  "22": "  %3 = load i8, ptr %arrayidx12, align 1, !dbg !161",
+  "24": "  %arrayidx17 = getelementptr inbounds nuw i8, ptr %out, i32 %div16, !dbg !164",
+  "25": "  store i8 %3, ptr %arrayidx17, align 1, !dbg !165"
+}

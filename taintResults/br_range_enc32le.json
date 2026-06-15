@@ -1,0 +1,5 @@
+{
+  "3": "  %dst.addr.0 = phi ptr [ %dst, %entry ], [ %add.ptr, %while.body ]",
+  "9": "  call fastcc void @br_enc32le(ptr noundef %dst.addr.0, i32 noundef %0) #4, !dbg !143",
+  "10": "  %add.ptr = getelementptr inbounds nuw i8, ptr %dst.addr.0, i32 4, !dbg !144"
+}

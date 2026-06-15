@@ -1,0 +1,8 @@
+{
+  "4": "  call void @shake256_squeezeblocks(ptr noundef %output, i32 noundef %div, ptr noundef nonnull %s) #4, !dbg !152",
+  "6": "  %add.ptr = getelementptr inbounds nuw i8, ptr %output, i32 %mul, !dbg !154",
+  "11": "  call void @shake256_squeezeblocks(ptr noundef nonnull %t, i32 noundef 1, ptr noundef nonnull %s) #4, !dbg !159",
+  "17": "  %0 = load i8, ptr %arrayidx, align 1, !dbg !169",
+  "18": "  %arrayidx2 = getelementptr inbounds nuw i8, ptr %add.ptr, i32 %i.0, !dbg !171",
+  "19": "  store i8 %0, ptr %arrayidx2, align 1, !dbg !172"
+}

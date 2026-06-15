@@ -1,0 +1,13 @@
+{
+  "6": "  call void @mayo_memset(ptr %y, i8 0, i32 156), !dbg !182",
+  "7": "  call void @mayo_memset(ptr %pk, i8 0, i32 149640), !dbg !192",
+  "8": "  %call = call i32 @pqmayo_MAYO_1_ref_mayo_expand_pk(ptr noundef %p, ptr noundef %cpk, ptr noundef nonnull %pk) #4, !dbg !206",
+  "11": "  call void @shake256(ptr noundef nonnull %tmp, i32 noundef 32, ptr noundef %m, i32 noundef %mlen) #4, !dbg !213",
+  "13": "  %add.ptr8 = getelementptr inbounds nuw i8, ptr %sig, i32 430, !dbg !215",
+  "14": "  %call9 = call ptr @memcpy(ptr noundef nonnull %add.ptr6, ptr noundef nonnull %add.ptr8, i32 noundef 24) #5, !dbg !216",
+  "15": "  call void @shake256(ptr noundef nonnull %tEnc, i32 noundef 39, ptr noundef nonnull %tmp, i32 noundef 56) #4, !dbg !217",
+  "16": "  call fastcc void @decode(ptr noundef nonnull %tEnc, ptr noundef nonnull %t, i32 noundef 78) #4, !dbg !218",
+  "17": "  call fastcc void @decode(ptr noundef %sig, ptr noundef nonnull %s, i32 noundef 860) #4, !dbg !219",
+  "18": "  call fastcc void @eval_public_map(ptr noundef %p, ptr noundef nonnull %s, ptr noundef nonnull %pk, ptr noundef nonnull %add.ptr, ptr noundef nonnull %add.ptr2, ptr noundef nonnull %y) #4, !dbg !220",
+  "19": "  %call20 = call i32 @memcmp(ptr noundef nonnull %y, ptr noundef nonnull %t, i32 noundef 78) #5, !dbg !221"
+}

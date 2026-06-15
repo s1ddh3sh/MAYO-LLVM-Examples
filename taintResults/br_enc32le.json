@@ -1,0 +1,9 @@
+{
+  "1": "  store i8 %conv, ptr %dst, align 1, !dbg !135",
+  "4": "  %arrayidx2 = getelementptr inbounds nuw i8, ptr %dst, i32 1, !dbg !138",
+  "5": "  store i8 %conv1, ptr %arrayidx2, align 1, !dbg !139",
+  "8": "  %arrayidx5 = getelementptr inbounds nuw i8, ptr %dst, i32 2, !dbg !142",
+  "9": "  store i8 %conv4, ptr %arrayidx5, align 1, !dbg !143",
+  "12": "  %arrayidx8 = getelementptr inbounds nuw i8, ptr %dst, i32 3, !dbg !146",
+  "13": "  store i8 %conv7, ptr %arrayidx8, align 1, !dbg !147"
+}

@@ -1,0 +1,9 @@
+{
+  "0": "  %0 = load i8, ptr %src, align 1, !dbg !133",
+  "2": "  %arrayidx1 = getelementptr inbounds nuw i8, ptr %src, i32 1, !dbg !135",
+  "3": "  %1 = load i8, ptr %arrayidx1, align 1, !dbg !135",
+  "7": "  %arrayidx3 = getelementptr inbounds nuw i8, ptr %src, i32 2, !dbg !139",
+  "8": "  %2 = load i8, ptr %arrayidx3, align 1, !dbg !139",
+  "12": "  %arrayidx7 = getelementptr inbounds nuw i8, ptr %src, i32 3, !dbg !143",
+  "13": "  %3 = load i8, ptr %arrayidx7, align 1, !dbg !143"
+}

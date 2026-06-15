@@ -1,0 +1,4 @@
+{
+  "2": "  call void @mayo_memset(ptr %iv, i8 0, i32 16), !dbg !143",
+  "4": "  call void @aes128_ctr(ptr noundef %output, i32 noundef %outputByteLen, ptr noundef nonnull %iv, ptr noundef nonnull %ctx) #4, !dbg !145"
+}

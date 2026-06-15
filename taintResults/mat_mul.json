@@ -1,0 +1,10 @@
+{
+  "2": "  %c.addr.0 = phi ptr [ %c, %entry ], [ %c.addr.1.lcssa, %for.inc4 ]",
+  "3": "  %a.addr.0 = phi ptr [ %a, %entry ], [ %add.ptr6, %for.inc4 ]",
+  "7": "  %c.addr.1 = phi ptr [ %incdec.ptr, %for.body3 ], [ %c.addr.0, %for.cond1.preheader ]",
+  "10": "  %call = call fastcc zeroext i8 @lincomb(ptr noundef %a.addr.0, ptr noundef %b, i32 noundef 8, i32 noundef 1) #4, !dbg !153",
+  "11": "  store i8 %call, ptr %c.addr.1, align 1, !dbg !156",
+  "12": "  %incdec.ptr = getelementptr inbounds nuw i8, ptr %c.addr.1, i32 1, !dbg !157",
+  "14": "  %c.addr.1.lcssa = phi ptr [ %c.addr.1, %for.cond1 ]",
+  "16": "  %add.ptr6 = getelementptr inbounds nuw i8, ptr %a.addr.0, i32 8, !dbg !163"
+}

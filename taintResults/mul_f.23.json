@@ -1,0 +1,18 @@
+{
+  "1": "  %xor1 = xor i8 %a, %0, !dbg !136",
+  "3": "  %2 = and i8 %xor1, 2, !dbg !139",
+  "4": "  %mul9 = mul i8 %2, %b, !dbg !140",
+  "6": "  %xor11 = xor i8 %conv10, %mul9, !dbg !141",
+  "7": "  %3 = and i8 %xor1, 4, !dbg !142",
+  "8": "  %mul16 = mul i8 %3, %b, !dbg !143",
+  "9": "  %xor18 = xor i8 %mul16, %xor11, !dbg !144",
+  "10": "  %4 = and i8 %xor1, 8, !dbg !145",
+  "11": "  %mul23 = mul i8 %4, %b, !dbg !146",
+  "12": "  %xor25 = xor i8 %mul23, %xor18, !dbg !147",
+  "13": "  %5 = lshr i8 %xor25, 4, !dbg !149",
+  "14": "  %6 = lshr i8 %xor25, 3, !dbg !150",
+  "15": "  %7 = and i8 %6, 14, !dbg !150",
+  "16": "  %8 = xor i8 %5, %7, !dbg !151",
+  "17": "  %xor25.masked = and i8 %xor25, 15, !dbg !152",
+  "18": "  %9 = xor i8 %8, %xor25.masked, !dbg !152"
+}

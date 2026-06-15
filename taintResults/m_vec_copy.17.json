@@ -1,0 +1,5 @@
+{
+  "4": "  %arrayidx = getelementptr inbounds nuw i64, ptr %in, i32 %i.0, !dbg !145",
+  "5": "  %0 = load i64, ptr %arrayidx, align 8, !dbg !145",
+  "7": "  store i64 %0, ptr %arrayidx1, align 8, !dbg !148"
+}

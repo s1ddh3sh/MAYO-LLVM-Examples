@@ -1,0 +1,3 @@
+{
+  "0": "  call fastcc void @aes_ecb4x(ptr noundef %out, ptr noundef %ivw, ptr noundef %sk_exp, i32 noundef %nrounds) #4, !dbg !138"
+}
