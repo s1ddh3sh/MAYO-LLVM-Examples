@@ -85,123 +85,117 @@ void dump_module(llvm::Module &M, const std::string &filename) {
 
 /// Trace a value backwards to its original AllocaInst, GlobalVariable, or
 /// Constant.
-Value *traceArgToRoot(Value *V) {
+Value *traceArgToRoot(Value *V, unsigned depth = 0) {
+  // Hard depth limit — avoid stack overflow on deep call chains
+  if (depth > 8)
+    return V;
+
   std::set<Value *> Visited;
 
   while (V && Visited.insert(V).second) {
 
-    // Already a constant
     if (isa<Constant>(V))
       return V;
 
-    // GEP
     if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
       V = GEP->getPointerOperand();
       continue;
     }
 
-    // Bitcast
     if (auto *BC = dyn_cast<BitCastInst>(V)) {
       V = BC->getOperand(0);
       continue;
     }
 
-    // Casts
     if (auto *CI = dyn_cast<CastInst>(V)) {
       V = CI->getOperand(0);
       continue;
     }
 
-    // Argument -> caller argument
     if (auto *Arg = dyn_cast<Argument>(V)) {
       Function *F = Arg->getParent();
 
-      bool FoundCall = false;
+      // If multiple callers pass different values, we can't resolve
+      // to a single constant — bail out early instead of recursing
+      // into every call site.
+      Value *ResolvedVal = nullptr;
+      bool Ambiguous = false;
 
       for (User *U : F->users()) {
         auto *CB = dyn_cast<CallBase>(U);
-        if (!CB)
+        if (!CB || CB->getCalledFunction() != F)
           continue;
 
-        if (CB->getCalledFunction() != F)
-          continue;
+        Value *Operand = CB->getArgOperand(Arg->getArgNo());
 
-        V = CB->getArgOperand(Arg->getArgNo());
-        FoundCall = true;
-        break;
+        // Trace this call site's argument (with incremented depth)
+        Value *Root = traceArgToRoot(Operand, depth + 1);
+
+        if (!ResolvedVal) {
+          ResolvedVal = Root;
+        } else if (ResolvedVal != Root) {
+          // Different call sites pass different values — ambiguous
+          Ambiguous = true;
+          break;
+        }
       }
 
-      if (!FoundCall)
-        return V;
+      if (Ambiguous || !ResolvedVal)
+        return V; // Can't resolve to a single root — return the arg itself
 
+      V = ResolvedVal;
       continue;
     }
 
-    // Try constant-folding instructions
     if (auto *I = dyn_cast<Instruction>(V)) {
 
       if (Constant *C =
               ConstantFoldInstruction(I, I->getModule()->getDataLayout()))
         return C;
 
-      // Handle binary ops manually
       if (auto *BO = dyn_cast<BinaryOperator>(I)) {
-
-        Value *L = traceArgToRoot(BO->getOperand(0));
-        Value *R = traceArgToRoot(BO->getOperand(1));
+        Value *L = traceArgToRoot(BO->getOperand(0), depth + 1);
+        Value *R = traceArgToRoot(BO->getOperand(1), depth + 1);
 
         auto *LC = dyn_cast<ConstantInt>(L);
         auto *RC = dyn_cast<ConstantInt>(R);
 
         if (LC && RC) {
-
           APInt LV = LC->getValue();
           APInt RV = RC->getValue();
 
           switch (BO->getOpcode()) {
-
           case Instruction::Add:
             return ConstantInt::get(I->getType(), LV + RV);
-
           case Instruction::Sub:
             return ConstantInt::get(I->getType(), LV - RV);
-
           case Instruction::Mul:
             return ConstantInt::get(I->getType(), LV * RV);
-
           case Instruction::UDiv:
             if (!RV.isZero())
               return ConstantInt::get(I->getType(), LV.udiv(RV));
             break;
-
           case Instruction::SDiv:
             if (!RV.isZero())
               return ConstantInt::get(I->getType(), LV.sdiv(RV));
             break;
-
           default:
             break;
           }
         }
       }
 
-      // PHI with same incoming constant
       if (auto *PN = dyn_cast<PHINode>(I)) {
-
         Constant *First = nullptr;
         bool Same = true;
 
         for (unsigned i = 0; i < PN->getNumIncomingValues(); i++) {
-
-          Value *Root = traceArgToRoot(PN->getIncomingValue(i));
-
+          Value *Root = traceArgToRoot(PN->getIncomingValue(i), depth + 1);
           auto *C = dyn_cast<Constant>(Root);
-
           if (!C) {
             Same = false;
             break;
           }
-
           if (!First)
             First = C;
           else if (First != C) {
@@ -214,17 +208,12 @@ Value *traceArgToRoot(Value *V) {
           return First;
       }
 
-      // Select with constant condition
       if (auto *SI = dyn_cast<SelectInst>(I)) {
-
-        Value *Cond = traceArgToRoot(SI->getCondition());
-
+        Value *Cond = traceArgToRoot(SI->getCondition(), depth + 1);
         if (auto *CC = dyn_cast<ConstantInt>(Cond)) {
-
           if (CC->isZero())
-            return traceArgToRoot(SI->getFalseValue());
-
-          return traceArgToRoot(SI->getTrueValue());
+            return traceArgToRoot(SI->getFalseValue(), depth + 1);
+          return traceArgToRoot(SI->getTrueValue(), depth + 1);
         }
       }
     }
@@ -309,11 +298,13 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
 
     Value *root = nullptr;
     if (FirstCall) {
+
       root = traceArgToRoot(FirstCall->getArgOperand(i));
     }
 
     if (argTy->isPointerTy()) {
       Value *ptr = nullptr;
+
       if (root) {
         if (auto *AI = dyn_cast<AllocaInst>(root)) {
           Type *allocTy = AI->getAllocatedType();
@@ -343,7 +334,8 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
                                Align(1));
           ptr = builder.CreateBitCast(newAlloc, argTy);
           // errs() << "  Arg " << i << " (" << arg->getName()
-          //        << "): global of type " << *valTy << " named " << name << "\n";
+          //        << "): global of type " << *valTy << " named " << name <<
+          //        "\n";
         }
       }
 
@@ -368,7 +360,8 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
         //        << CI->getZExtValue() << "\n";
       } else {
         callArgs.push_back(ConstantInt::get(argTy, 0));
-        // errs() << "  Arg " << i << " (" << arg->getName() << "): default 0\n";
+        // errs() << "  Arg " << i << " (" << arg->getName() << "): default
+        // 0\n";
       }
     } else {
       callArgs.push_back(Constant::getNullValue(argTy));
@@ -390,7 +383,13 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
 
 std::unique_ptr<Module> extractFunction(Module &M, Function *F) {
   auto newMod = CloneModule(M);
-
+  for (GlobalVariable &GV : newMod->globals()) {
+    if (!GV.hasInitializer()) {
+      // Give it a zero initializer of the correct type
+      GV.setInitializer(Constant::getNullValue(GV.getValueType()));
+      GV.setLinkage(GlobalValue::InternalLinkage);
+    }
+  }
   std::set<std::string> keep;
   keep.insert(F->getName().str());
 
@@ -735,12 +734,26 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  if (Function *F = funcModule->getFunction(funcName))
+  for (GlobalVariable &GV : funcModule->globals()) {
+    if (GV.isDeclaration() || !GV.hasInitializer()) {
+      GV.setInitializer(Constant::getNullValue(GV.getValueType()));
+      GV.setLinkage(GlobalValue::InternalLinkage);
+      GV.setConstant(false);
+      GV.setExternallyInitialized(false);
+    }
+  }
+  StripDebugInfo(*funcModule);
+
+  if (Function *F = funcModule->getFunction(funcName)) {
     F->setLinkage(GlobalValue::ExternalLinkage);
+    F->setCallingConv(CallingConv::C);
+    F->removeRetAttr(Attribute::Range);
+  }
 
   {
     Function *extractedFunc = funcModule->getFunction(funcName);
     if (extractedFunc) {
+
       // errs() << "Creating driver function for " << funcName << "...\n";
       createDynamicDriverFunction(*module, *funcModule, extractedFunc);
     }
@@ -762,7 +775,6 @@ int main(int argc, char **argv) {
     buildPipeline(MPM);
     MPM.run(M, MAM);
   };
-
   // Unroll for original.ll
   for (Function &F : *funcModule) {
     F.removeFnAttr(Attribute::NoInline);
@@ -830,9 +842,8 @@ int main(int argc, char **argv) {
     MPM.run(*funcModule, MAM);
   }
   StripDebugInfo(*funcModule);
-
   if (verifyModule(*funcModule, &errs())) {
-    errs() << "Invalid IR after LabeledUnrollPass\n";
+    errs() << "Invalid IR\n";
     return 1;
   }
   std::string fn = "../results/" + funcName + ".ll";
