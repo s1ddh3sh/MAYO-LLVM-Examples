@@ -1115,5 +1115,22 @@ int main(int argc, char **argv) {
   }
 
 
+  std::string bmcCmdCorrect = "../llvmbmc ../results/original.ll --dump-solver-query "
+                              "-f main --var-suffix correct ";
+  run_command(bmcCmdCorrect);
+  run_command("cp /tmp/test.smt2 ../correct.smt2");
+  if (mode == LOOP_SKIP) {
+    std::string bmcCmdFaulty = "../llvmbmc ../results/loopOrFuncSkip/loopSkip.ll --dump-solver-query "
+                               "-f main --var-suffix faulty ";
+    run_command(bmcCmdFaulty);
+    run_command("cp /tmp/test.smt2 ../loopFault.smt2");
+  } else {
+    std::string bmcCmdFaulty = "../llvmbmc ../results/loopOrFuncSkip/funcSkip.ll --dump-solver-query "
+                               "-f main --var-suffix faulty ";
+    run_command(bmcCmdFaulty);
+    run_command("cp /tmp/test.smt2 ../funcSkip.smt2");
+  }
+
+
   return 0;
 }

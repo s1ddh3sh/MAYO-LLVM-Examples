@@ -26,7 +26,7 @@ endif()
 
 add_executable(loop_fn_Fault loop_fn_Fault.cpp)
 add_executable(binOpFault binOpFault.cpp)
-add_executable(smt_parser3 ../smt_parser2.cpp)
+add_executable(smt_parser3 ../smt_parser3.cpp)
 
 # Map needed LLVM components to library names
 llvm_map_components_to_libnames(LLVM_LIBS
