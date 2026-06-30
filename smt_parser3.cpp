@@ -40,91 +40,94 @@ string rewrite_to_bv(const string &filename) {
   content = strip_boilerplate(content);
 
   // 2. Array Int Int  →  Array Int (_ BitVec 8)
-  {
-    const string from = "(Array Int Int)";
-    const string to = "(Array Int (_ BitVec 8))";
-    size_t pos = 0;
-    while ((pos = content.find(from, pos)) != string::npos) {
-      content.replace(pos, from.size(), to);
-      pos += to.size();
-    }
-  }
+  // {
+  //   const string from = "(Array Int Int)";
+  //   const string to = "(Array Int (_ BitVec 8))";
+  //   size_t pos = 0;
+  //   while ((pos = content.find(from, pos)) != string::npos) {
+  //     content.replace(pos, from.size(), to);
+  //     pos += to.size();
+  //   }
+  // }
 
-  {
+  // {
 
-    regex store_zero(R"(\(store\s+(\S+)\s+(\([^)]*\))\s+0\))");
-    content = regex_replace(content, store_zero, "(store $1 $2 #x00)");
-    // Also handle index that is a plain int var (no parens):
-    regex store_zero2(R"(\(store\s+(\S+)\s+(\S+)\s+0\))");
-    content = regex_replace(content, store_zero2, "(store $1 $2 #x00)");
-  }
+  //   regex store_zero(R"(\(store\s+(\S+)\s+(\([^)]*\))\s+0\))");
+  //   content = regex_replace(content, store_zero, "(store $1 $2 #x00)");
+  //   // Also handle index that is a plain int var (no parens):
+  //   regex store_zero2(R"(\(store\s+(\S+)\s+(\S+)\s+0\))");
+  //   content = regex_replace(content, store_zero2, "(store $1 $2 #x00)");
+  // }
 
-  // 4. Strip the int2bv/bv2int round-trip wrapper the LLVM→SMT tool emits
-  //    for every XOR step:
-  //
-  //   (assert (let ((a!1 (bvxor ((_ int2bv 8) (select MEM IDX_A))
-  //                             ((_ int2bv 8) (select MEM IDX_B)))))
-  //     (let ((a!2 (store MEM2 IDX_C
-  //                   (ite (bvslt a!1 #x00) (- (bv2int a!1) 256)
-  //                                         (bv2int a!1)))))
-  //       (= C_NEW a!2))))
-  //
-  //  →  (assert (= C_NEW (store MEM2 IDX_C
-  //                          (bvxor (select MEM IDX_A) (select MEM IDX_B)))))
-  //
-  //  The index expressions like (+ 780 i_5_Vdec_correct) can contain spaces
-  //  so we use [\s\S]*? carefully and DOTALL via a line-by-line join.
-  {
-    // Work on the whole file as one string.
-    // Capture groups:
-    //  1 = bvop (always bvxor here)
-    //  2 = MEM  (source array for both selects)
-    //  3 = IDX_A (first select index – may be "(+ N VAR)")
-    //  4 = IDX_B (second select index)
-    //  5 = MEM2 (destination array – same as MEM in practice)
-    //  6 = IDX_C (store destination index)
-    //  7 = C_NEW (LHS name)
+  // // 4. Strip the int2bv/bv2int round-trip wrapper the LLVM→SMT tool emits
+  // //    for every XOR step:
+  // //
+  // //   (assert (let ((a!1 (bvxor ((_ int2bv 8) (select MEM IDX_A))
+  // //                             ((_ int2bv 8) (select MEM IDX_B)))))
+  // //     (let ((a!2 (store MEM2 IDX_C
+  // //                   (ite (bvslt a!1 #x00) (- (bv2int a!1) 256)
+  // //                                         (bv2int a!1)))))
+  // //       (= C_NEW a!2))))
+  // //
+  // //  →  (assert (= C_NEW (store MEM2 IDX_C
+  // //                          (bvxor (select MEM IDX_A) (select MEM
+  // IDX_B)))))
+  // //
+  // //  The index expressions like (+ 780 i_5_Vdec_correct) can contain spaces
+  // //  so we use [\s\S]*? carefully and DOTALL via a line-by-line join.
+  // {
+  //   // Work on the whole file as one string.
+  //   // Capture groups:
+  //   //  1 = bvop (always bvxor here)
+  //   //  2 = MEM  (source array for both selects)
+  //   //  3 = IDX_A (first select index – may be "(+ N VAR)")
+  //   //  4 = IDX_B (second select index)
+  //   //  5 = MEM2 (destination array – same as MEM in practice)
+  //   //  6 = IDX_C (store destination index)
+  //   //  7 = C_NEW (LHS name)
 
-    regex pat(R"(\(assert\s*\(let\s*\(\(a!1\s*\((bv\w+)\s*)"
-              R"(\(\(_ int2bv 8\)\s*\(select\s+(\S+)\s+(\([^)]*\))\)\)\s*)"
-              R"(\(\(_ int2bv 8\)\s*\(select\s+\S+\s+(\([^)]*\))\)\)\)\)\)\s*)"
-              R"(\(let\s*\(\(a!2\s*\(store\s+(\S+)\s+(\([^)]*\))\s*)"
-              R"(\(ite\s*\(bvslt\s+a!1\s+#x00\)\s*)"
-              R"(\(-\s*\(bv2int\s+a!1\)\s+256\)\s*)"
-              R"(\(bv2int\s+a!1\)\)\)\)\)\s*)"
-              R"(\(=\s+(\S+)\s+a!2\)\)\)\))");
+  //   regex pat(R"(\(assert\s*\(let\s*\(\(a!1\s*\((bv\w+)\s*)"
+  //             R"(\(\(_ int2bv 8\)\s*\(select\s+(\S+)\s+(\([^)]*\))\)\)\s*)"
+  //             R"(\(\(_ int2bv
+  //             8\)\s*\(select\s+\S+\s+(\([^)]*\))\)\)\)\)\)\s*)"
+  //             R"(\(let\s*\(\(a!2\s*\(store\s+(\S+)\s+(\([^)]*\))\s*)"
+  //             R"(\(ite\s*\(bvslt\s+a!1\s+#x00\)\s*)"
+  //             R"(\(-\s*\(bv2int\s+a!1\)\s+256\)\s*)"
+  //             R"(\(bv2int\s+a!1\)\)\)\)\)\s*)"
+  //             R"(\(=\s+(\S+)\s+a!2\)\)\)\))");
 
-    string result;
-    auto it = content.cbegin();
-    auto end = content.cend();
-    smatch m;
-    while (regex_search(it, end, m, pat)) {
-      result += m.prefix().str();
-      string op = m[1];    // bvxor
-      string mem = m[2];   // source array
-      string idxA = m[3];  // first index
-      string idxB = m[4];  // second index
-      string mem2 = m[5];  // dest array (== mem)
-      string idxC = m[6];  // output index
-      string c_new = m[7]; // new array name
+  //   string result;
+  //   auto it = content.cbegin();
+  //   auto end = content.cend();
+  //   smatch m;
+  //   while (regex_search(it, end, m, pat)) {
+  //     result += m.prefix().str();
+  //     string op = m[1];    // bvxor
+  //     string mem = m[2];   // source array
+  //     string idxA = m[3];  // first index
+  //     string idxB = m[4];  // second index
+  //     string mem2 = m[5];  // dest array (== mem)
+  //     string idxC = m[6];  // output index
+  //     string c_new = m[7]; // new array name
 
-      result += "(assert (= " + c_new + " (store " + mem2 + " " + idxC + " (" +
-                op + " (select " + mem + " " + idxA + ")" + " (select " + mem +
-                " " + idxB + ")))))";
-      it = m.suffix().first;
-    }
-    result += string(it, end);
-    content = result;
-  }
+  //     result += "(assert (= " + c_new + " (store " + mem2 + " " + idxC + " ("
+  //     +
+  //               op + " (select " + mem + " " + idxA + ")" + " (select " + mem
+  //               + " " + idxB + ")))))";
+  //     it = m.suffix().first;
+  //   }
+  //   result += string(it, end);
+  //   content = result;
+  // }
 
-  // 5. Remove any leftover  (bv2int (...))  and  ((_ int2bv 8) ...)
-  {
-    regex bv2int_pat(R"(\(bv2int (\([^)]+\))\))");
-    content = regex_replace(content, bv2int_pat, "$1");
+  // // 5. Remove any leftover  (bv2int (...))  and  ((_ int2bv 8) ...)
+  // {
+  //   regex bv2int_pat(R"(\(bv2int (\([^)]+\))\))");
+  //   content = regex_replace(content, bv2int_pat, "$1");
 
-    regex int2bv_pat(R"(\(\(_ int2bv 8\) ([^)]+)\))");
-    content = regex_replace(content, int2bv_pat, "$1");
-  }
+  //   regex int2bv_pat(R"(\(\(_ int2bv 8\) ([^)]+)\))");
+  //   content = regex_replace(content, int2bv_pat, "$1");
+  // }
 
   return content;
 }
@@ -208,16 +211,15 @@ int main(int argc, char **argv) {
   //
   // b_7_exit = (i_3_i.0.i9 != 860).
   // We force i_3_i.0.i9 = 860  ⟹  b_7_exit = false  ⟹  b_12_path is taken.
-  // for (const char *tag : {"C1", "F1", "C2", "F2"}) {
-  //   string pfx = (tag[0] == 'C') ? "correct_" : "faulty_";
-  //   s.add(ctx.int_const(("i_3_i.0.i9_" + pfx + tag).c_str()) ==
-  //         ctx.int_val(860));
-  //   // Also force the outer-loop iteration variable to 0 so c_2 == c_1.
-  //   s.add(ctx.int_const(("i_1_i.0.i_" + pfx + tag).c_str()) ==
-  //   ctx.int_val(0));
-  //   // Force b_2_path so the entry block is reachable.
-  //   s.add(ctx.bool_const(("b_2_path_" + pfx + tag).c_str()));
-  // }
+  for (const char *tag : {"C1", "F1", "C2", "F2"}) {
+    string pfx = (tag[0] == 'C') ? "correct_" : "faulty_";
+    s.add(ctx.int_const(("i_3_i.0.i9_" + pfx + tag).c_str()) ==
+          ctx.int_val(860));
+    // Also force the outer-loop iteration variable to 0 so c_2 == c_1.
+    s.add(ctx.int_const(("i_1_i.0.i_" + pfx + tag).c_str()) == ctx.int_val(0));
+    // Force b_2_path so the entry block is reachable.
+    s.add(ctx.bool_const(("b_2_path_" + pfx + tag).c_str()));
+  }
 
   for (const char *tag : {"C1", "F1", "C2", "F2"}) {
     s.add(ctx.int_const((string("i_3_i.0.i9_") + tag).c_str()) ==
@@ -267,7 +269,7 @@ int main(int argc, char **argv) {
   }
 
   model m = s.get_model();
-  // cout << m << "\n";
+  cout << m << "\n";
   auto ev = [&](expr e) { return m.eval(e, true); };
   expr mem = ctx.constant("c_1_Global_M_correct_C1", arr);
 
