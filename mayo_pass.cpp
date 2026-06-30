@@ -50,6 +50,8 @@
 #include <utility>
 #include <vector>
 
+#include "json_parser.h"
+
 using namespace llvm;
 void run_command(const std::string &cmd) {
   int ret = system(cmd.c_str());
@@ -265,9 +267,46 @@ unsigned inferPointerAllocSize(Argument *arg, unsigned defaultSize) {
   scanUsers(arg);
   return foundGEP ? maxOffset : defaultSize;
 }
+static void emitAssert(IRBuilder<> &builder, LLVMContext &ctx, Value *cond,
+                       Function *parentFn) {
+  Function *trapFn =
+      Intrinsic::getOrInsertDeclaration(parentFn->getParent(), Intrinsic::trap);
+
+  BasicBlock *failBB = BasicBlock::Create(ctx, "assert.fail", parentFn);
+  BasicBlock *contBB = BasicBlock::Create(ctx, "assert.cont", parentFn);
+
+  builder.CreateCondBr(cond, contBB, failBB);
+
+  builder.SetInsertPoint(failBB);
+  builder.CreateCall(trapFn);
+  builder.CreateUnreachable();
+
+  builder.SetInsertPoint(contBB);
+}
+
+static void zeroFillThenStoreU64(IRBuilder<> &builder, LLVMContext &ctx,
+                                 Value *basePtr, uint64_t allocSize,
+                                 bool haveVal, uint64_t val) {
+  builder.CreateMemSet(basePtr, builder.getInt8(0), allocSize, Align(1));
+  if (!haveVal || allocSize == 0)
+    return;
+
+  if (allocSize >= 8) {
+    Value *i64Ptr = builder.CreateBitCast(
+        basePtr, PointerType::getUnqual(Type::getInt64Ty(ctx)));
+    builder.CreateStore(ConstantInt::get(Type::getInt64Ty(ctx), val), i64Ptr);
+  } else {
+    // Narrow buffer: store only as many low bytes as fit.
+    Type *narrowTy = Type::getIntNTy(ctx, (unsigned)allocSize * 8);
+    Value *narrowPtr =
+        builder.CreateBitCast(basePtr, PointerType::getUnqual(narrowTy));
+    builder.CreateStore(ConstantInt::get(narrowTy, val), narrowPtr);
+  }
+}
 
 void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
-                                 Function *TargetF) {
+                                 Function *TargetF,
+                                 const JsonObject &testcase) {
   LLVMContext &ctx = ExtractedM.getContext();
 
   FunctionType *driverTy = FunctionType::get(Type::getInt32Ty(ctx), false);
@@ -278,7 +317,38 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
   IRBuilder<> builder(entry);
 
   std::vector<Value *> callArgs;
+  std::vector<Value *> argPtrsByPos(TargetF->arg_size(), nullptr);
+  std::vector<uint64_t> argAllocSizeByPos(TargetF->arg_size(), 0);
 
+  std::vector<const JsonValue *> positionalVals;
+  for (auto &kv : testcase) {
+    if (kv.first == "output")
+      continue;
+    positionalVals.push_back(&kv.second);
+  }
+
+  if (positionalVals.size() != TargetF->arg_size()) {
+    errs() << "Warning: testcase has " << positionalVals.size()
+           << " positional values but " << TargetF->getName() << " has "
+           << TargetF->arg_size() << " arguments. "
+           << "Extra/missing args will fall back to zero.\n";
+  }
+  int outputArgPos = -1;
+  if (jsonHas(testcase, "output")) {
+    const JsonValue &outVal = jsonGet(testcase, "output");
+    if (outVal.isString) {
+      int pos = 0;
+      for (auto &kv : testcase) {
+        if (kv.first == "output")
+          continue;
+        if (kv.first == outVal.strVal) {
+          outputArgPos = pos;
+          break;
+        }
+        pos++;
+      }
+    }
+  }
   Function *OrigF = OriginalM.getFunction(TargetF->getName());
   CallBase *FirstCall = nullptr;
   if (OrigF) {
@@ -298,13 +368,17 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
 
     Value *root = nullptr;
     if (FirstCall) {
-
       root = traceArgToRoot(FirstCall->getArgOperand(i));
     }
 
+    bool haveJsonVal = i < positionalVals.size();
+    uint64_t jsonVal = haveJsonVal ? positionalVals[i]->asUInt64() : 0;
+    bool isOutputArg = ((int)i == outputArgPos);
+    bool doStore = haveJsonVal && !isOutputArg;
+
     if (argTy->isPointerTy()) {
       Value *ptr = nullptr;
-
+      uint64_t allocSize = 0;
       if (root) {
         if (auto *AI = dyn_cast<AllocaInst>(root)) {
           Type *allocTy = AI->getAllocatedType();
@@ -313,14 +387,21 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
             name = "buf";
           AllocaInst *newAlloc = builder.CreateAlloca(allocTy, nullptr, name);
           newAlloc->setAlignment(Align(16));
-          uint64_t allocSize =
-              ExtractedM.getDataLayout().getTypeAllocSize(allocTy);
-          builder.CreateMemSet(newAlloc, builder.getInt8(0), allocSize,
-                               Align(1));
+          allocSize = ExtractedM.getDataLayout().getTypeAllocSize(allocTy);
+
+          zeroFillThenStoreU64(builder, ctx, newAlloc, allocSize, doStore,
+                               jsonVal);
+
+          // uint8_t fillByte =
+          //     haveJsonVal ? (uint8_t)(jsonVal & 0xFF) : (uint8_t)0;
+          // builder.CreateMemSet(newAlloc, builder.getInt8(fillByte),
+          // allocSize,
+          //                      Align(1));
+
           ptr = builder.CreateBitCast(newAlloc, argTy);
-          // errs() << "  Arg " << i << " (" << arg->getName()
-          //        << "): alloca of type " << *allocTy << " named " << name
-          //        << "\n";
+          errs() << "  Arg " << i << " (" << arg->getName()
+                 << "): alloca of type " << *allocTy << " named " << name
+                 << "\n";
         } else if (auto *GV = dyn_cast<GlobalVariable>(root)) {
           Type *valTy = GV->getValueType();
           std::string name = GV->getName().str();
@@ -328,50 +409,127 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
             name = "buf";
           AllocaInst *newAlloc = builder.CreateAlloca(valTy, nullptr, name);
           newAlloc->setAlignment(Align(16));
-          uint64_t allocSize =
-              ExtractedM.getDataLayout().getTypeAllocSize(valTy);
-          builder.CreateMemSet(newAlloc, builder.getInt8(0), allocSize,
-                               Align(1));
+          allocSize = ExtractedM.getDataLayout().getTypeAllocSize(valTy);
+          zeroFillThenStoreU64(builder, ctx, newAlloc, allocSize, doStore,
+                               jsonVal);
+          // uint8_t fillByte =
+          //     haveJsonVal ? (uint8_t)(jsonVal & 0xFF) : (uint8_t)0;
+          // builder.CreateMemSet(newAlloc, builder.getInt8(fillByte),
+          // allocSize,
+          //                      Align(1));
+
           ptr = builder.CreateBitCast(newAlloc, argTy);
-          // errs() << "  Arg " << i << " (" << arg->getName()
-          //        << "): global of type " << *valTy << " named " << name <<
-          //        "\n";
+          errs() << "  Arg " << i << " (" << arg->getName()
+                 << "): global of type " << *valTy << " named " << name << "\n";
         }
       }
 
       if (!ptr) {
-        unsigned allocSize = inferPointerAllocSize(arg, 128);
-        ArrayType *arrTy = ArrayType::get(Type::getInt8Ty(ctx), allocSize);
+        unsigned fallbackSize = inferPointerAllocSize(arg, 128);
+        // unsigned allocSize = inferPointerAllocSize(arg, 128);
+        ArrayType *arrTy = ArrayType::get(Type::getInt8Ty(ctx), fallbackSize);
         AllocaInst *alloc =
             builder.CreateAlloca(arrTy, nullptr, arg->getName() + "_buf");
         alloc->setAlignment(Align(16));
-        builder.CreateMemSet(alloc, builder.getInt8(0), allocSize, Align(1));
+        allocSize = fallbackSize;
+
+        zeroFillThenStoreU64(builder, ctx, alloc, fallbackSize, doStore,
+                             jsonVal);
+        // uint8_t fillByte = haveJsonVal ? (uint8_t)(jsonVal & 0xFF) :
+        // (uint8_t)0; builder.CreateMemSet(alloc, builder.getInt8(fillByte),
+        // fallbackSize,
+        //                      Align(1));
+
         ptr = builder.CreateBitCast(alloc, argTy);
-        // errs() << "  Arg " << i << " (" << arg->getName()
-        //        << "): fallback -> alloca [" << allocSize << " x i8]\n";
+        errs() << "  Arg " << i << " (" << arg->getName()
+               << "): fallback -> alloca [" << allocSize << " x i8]\n";
       }
       callArgs.push_back(ptr);
+      argPtrsByPos[i] = ptr;
+      argAllocSizeByPos[i] = allocSize;
 
     } else if (argTy->isIntegerTy()) {
-      if (root && isa<ConstantInt>(root)) {
+      if (haveJsonVal) {
+        callArgs.push_back(ConstantInt::get(argTy, jsonVal));
+        errs() << "  Arg " << i << " (" << arg->getName()
+               << "): testcase value " << jsonVal << "\n";
+      } else if (root && isa<ConstantInt>(root)) {
         ConstantInt *CI = cast<ConstantInt>(root);
         callArgs.push_back(ConstantInt::get(argTy, CI->getZExtValue()));
-        // errs() << "  Arg " << i << " (" << arg->getName() << "): constant "
-        //        << CI->getZExtValue() << "\n";
+        errs() << "  Arg " << i << " (" << arg->getName() << "): constant "
+               << CI->getZExtValue() << "\n";
       } else {
         callArgs.push_back(ConstantInt::get(argTy, 0));
-        // errs() << "  Arg " << i << " (" << arg->getName() << "): default
-        // 0\n";
+        errs() << "  Arg " << i << " (" << arg->getName() << "): default 0\n";
       }
     } else {
       callArgs.push_back(Constant::getNullValue(argTy));
-      // errs() << "  Arg " << i << " (" << arg->getName()
-      //        << "): unknown type -> null\n";
+      errs() << "  Arg " << i << " (" << arg->getName()
+             << "): unknown type -> null\n";
     }
   }
 
   CallInst *callI = builder.CreateCall(TargetF, callArgs);
   callI->setCallingConv(TargetF->getCallingConv());
+
+  // Output assertion
+  if (jsonHas(testcase, "output")) {
+    const JsonValue &outVal = jsonGet(testcase, "output");
+    if (outVal.isString) {
+      std::string outKeyName = outVal.strVal;
+
+      int outPos = -1;
+      long long expected = 0;
+      bool foundExpected = false;
+      int pos = 0;
+      for (auto &kv : testcase) {
+        if (kv.first == "output")
+          continue;
+        if (kv.first == outKeyName) {
+          outPos = pos;
+          expected = kv.second.asInt();
+          foundExpected = true;
+        }
+        pos++;
+      }
+
+      if (outPos >= 0 && foundExpected &&
+          (size_t)outPos < argPtrsByPos.size() && argPtrsByPos[outPos]) {
+        Value *outPtr = argPtrsByPos[outPos];
+        uint64_t outAllocSize = argAllocSizeByPos[outPos];
+        Value *cmp = nullptr;
+        if (outAllocSize >= 8) {
+          Value *i64Ptr = builder.CreateBitCast(
+              outPtr, PointerType::getUnqual(Type::getInt64Ty(ctx)));
+          Value *actual = builder.CreateLoad(Type::getInt64Ty(ctx), i64Ptr,
+                                             "out_actual_i64");
+          Value *expectedC = ConstantInt::get(Type::getInt64Ty(ctx), expected);
+          cmp = builder.CreateICmpEQ(actual, expectedC, "out_cmp");
+        } else if (outAllocSize > 0) {
+          Type *narrowTy = Type::getIntNTy(ctx, (unsigned)outAllocSize * 8);
+          Value *narrowPtr =
+              builder.CreateBitCast(outPtr, PointerType::getUnqual(narrowTy));
+          Value *actual =
+              builder.CreateLoad(narrowTy, narrowPtr, "out_actual_narrow");
+          Value *expectedC = ConstantInt::get(narrowTy, expected);
+          cmp = builder.CreateICmpEQ(actual, expectedC, "out_cmp");
+        }
+
+        if (cmp) {
+          emitAssert(builder, ctx, cmp, driver);
+          errs() << "  Inserted output assertion: arg" << outPos << " ("
+                 << outKeyName << ") i64[0] == " << expected << "\n";
+        } else {
+          errs() << "  Warning: output buffer for '" << outKeyName
+                 << "' has zero size, skipping assertion\n";
+        }
+      } else {
+        errs() << "  Warning: could not resolve output assertion for '"
+               << outKeyName << "' (bad position or non-pointer arg)\n";
+      }
+    }
+  }
+
   builder.CreateRet(builder.getInt32(0));
 
   // Prevent the driver from being optimized away or inlined
@@ -754,8 +912,18 @@ int main(int argc, char **argv) {
     Function *extractedFunc = funcModule->getFunction(funcName);
     if (extractedFunc) {
 
-      // errs() << "Creating driver function for " << funcName << "...\n";
-      createDynamicDriverFunction(*module, *funcModule, extractedFunc);
+      errs() << "Creating driver function for " << funcName << "...\n";
+
+      std::string jsonPath = "../function_inputs/" + funcName + ".json";
+
+      std::vector<JsonObject> testcases = readJsonLines(jsonPath);
+      if (testcases.empty()) {
+        errs() << "No testcases found in " << jsonPath << "\n";
+        return 1;
+      }
+      const JsonObject &testcase = testcases.front();
+      createDynamicDriverFunction(*module, *funcModule, extractedFunc,
+                                  testcase);
     }
   }
 
