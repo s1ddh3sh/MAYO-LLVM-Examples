@@ -780,5 +780,7 @@
                   (ite (bvslt a!1 #x00) (- (bv2int a!1) 256) (bv2int a!1)))))
   (= c_93_Global_M_correct a!2))))
 (assert (= i_10_ret_val_correct 0))
-(assert (not true))
+(assert (let ((a!1 (or (not b_12_path)
+               (= (select c_93_Global_M_correct (+ 780 i_9_s_correct)) 12))))
+  (not a!1)))
 (check-sat)

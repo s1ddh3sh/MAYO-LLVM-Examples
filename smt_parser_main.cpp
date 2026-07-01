@@ -303,7 +303,6 @@ int main() {
 
   slv.add(sC2 != sF2);
 
-  // These selects exist regardless of whether the XOR was skipped.
   //   expr sel_vdec_c = select(prev_c, vdec_addr);
   //   expr sel_ox_c = select(prev_c, ox_addr);
 
@@ -425,7 +424,7 @@ int main() {
     break;
   }
   case unsat:
-    cout << "UNSAT — fault is silent at s[0] for all inputs\n";
+    cout << "UNSAT \n";
     break;
   case unknown:
     cout << "UNKNOWN\n";

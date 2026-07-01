@@ -767,3 +767,6 @@
                   (ite (bvslt a!1 #x00) (- (bv2int a!1) 256) (bv2int a!1)))))
   (= c_93_Global_M_faulty_F1 a!2))))
 (assert (= i_10_ret_val_faulty_F1 0))
+(assert (let ((a!1 (or (not b_12_path_F1)
+               (= (select c_93_Global_M_faulty_F1 (+ 780 i_9_s_faulty_F1)) 12))))
+  (not a!1)))

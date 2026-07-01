@@ -1,0 +1,25 @@
+SAT — found ineffective/effective Ox pair
+
+Shared indices
+Vdec index = 0
+Ox1  index = 77  (addr = 857)
+Ox2  index = 76  (addr = 856)
+s    index = 77  (addr = 935)
+
+------------------------------
+Input bytes
+Vdec = 126  (BV = #x7e)
+Ox1  = (- 256)  (BV = #x00)
+Ox2  = (- 2)  (BV = #xfe)
+
+------------------------------
+Execution 1 (ineffective fault)
+Correct s = 126
+Faulty  s = 126
+Correct XOR (BV8) = #x7e
+
+------------------------------
+Execution 2 (effective fault)
+Correct s = (- 128)
+Faulty  s = 126
+Correct XOR (BV8) = #x80
