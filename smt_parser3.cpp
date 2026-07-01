@@ -138,7 +138,7 @@ string write_suffixed(const string &content, const string &tag) {
   regex ident(R"(\b((?:i|c|b)_\d+_[A-Za-z0-9_.]+)\b)");
   result = regex_replace(result, ident, "$1_" + tag);
 
-  string path = "/tmp/z3_" + tag + ".smt2";
+  string path = "../" + tag + ".smt2";
   ofstream ofs(path);
   if (!ofs) {
     cerr << "Cannot write " << path << "\n";
@@ -178,21 +178,21 @@ int main(int argc, char **argv) {
   s.add(vdec >= ctx.int_val(0));
   s.add(vdec < ctx.int_val(780));
   for (const char *tag : {"correct_C1", "faulty_F1", "correct_C2", "faulty_F2"})
-    s.add(ctx.int_const(("i_5_Vdec_" + string(tag)).c_str()) == vdec);
+    s.add(ctx.int_const(("i_2_Vdec_" + string(tag)).c_str()) == vdec);
 
   // Ox1: column tested by run pair (C1, F1).
   expr ox1 = ctx.int_const("ox1_shared");
   s.add(ox1 >= ctx.int_val(0));
   s.add(ox1 < ctx.int_val(78));
-  s.add(ctx.int_const("i_7_Ox_correct_C1") == ox1);
-  s.add(ctx.int_const("i_7_Ox_faulty_F1") == ox1);
+  s.add(ctx.int_const("i_4_Ox_correct_C1") == ox1);
+  s.add(ctx.int_const("i_4_Ox_faulty_F1") == ox1);
 
   // Ox2: column tested by run pair (C2, F2).
   expr ox2 = ctx.int_const("ox2_shared");
   s.add(ox2 >= ctx.int_val(0));
   s.add(ox2 < ctx.int_val(78));
-  s.add(ctx.int_const("i_7_Ox_correct_C2") == ox2);
-  s.add(ctx.int_const("i_7_Ox_faulty_F2") == ox2);
+  s.add(ctx.int_const("i_4_Ox_correct_C2") == ox2);
+  s.add(ctx.int_const("i_4_Ox_faulty_F2") == ox2);
 
   // The two columns must be distinct.
   s.add(ox1 != ox2);
@@ -210,37 +210,39 @@ int main(int argc, char **argv) {
   //   b_12_path  (b_7_exit == false): executes the XOR / fault
   //
   // b_7_exit = (i_3_i.0.i9 != 860).
-  // We force i_3_i.0.i9 = 860  ⟹  b_7_exit = false  ⟹  b_12_path is taken.
-  for (const char *tag : {"C1", "F1", "C2", "F2"}) {
-    string pfx = (tag[0] == 'C') ? "correct_" : "faulty_";
-    s.add(ctx.int_const(("i_3_i.0.i9_" + pfx + tag).c_str()) ==
-          ctx.int_val(860));
-    // Also force the outer-loop iteration variable to 0 so c_2 == c_1.
-    s.add(ctx.int_const(("i_1_i.0.i_" + pfx + tag).c_str()) == ctx.int_val(0));
-    // Force b_2_path so the entry block is reachable.
-    s.add(ctx.bool_const(("b_2_path_" + pfx + tag).c_str()));
-  }
+  // for (const char *tag : {"C1", "F1", "C2", "F2"}) {
+  //   string pfx = (tag[0] == 'C') ? "correct_" : "faulty_";
+  //   s.add(ctx.int_const(("i_3_i.0.i9_" + pfx + tag).c_str()) ==
+  //         ctx.int_val(860));
+  //   // Also force the outer-loop iteration variable to 0 so c_2 == c_1.
+  //   s.add(ctx.int_const(("i_1_i.0.i_" + pfx + tag).c_str()) ==
+  //   ctx.int_val(0));
+  //   // Force b_2_path so the entry block is reachable.
+  //   s.add(ctx.bool_const(("b_2_path_" + pfx + tag).c_str()));
+  // }
 
-  for (const char *tag : {"C1", "F1", "C2", "F2"}) {
-    s.add(ctx.int_const((string("i_3_i.0.i9_") + tag).c_str()) ==
-          ctx.int_val(860));
-    s.add(ctx.int_const((string("i_1_i.0.i_") + tag).c_str()) ==
-          ctx.int_val(0));
-    s.add(ctx.bool_const((string("b_2_path_") + tag).c_str()));
-  }
+  // for (const char *tag : {"C1", "F1", "C2", "F2"}) {
+  //   s.add(ctx.int_const((string("i_3_i.0.i9_") + tag).c_str()) ==
+  //         ctx.int_val(860));
+  //   s.add(ctx.int_const((string("i_1_i.0.i_") + tag).c_str()) ==
+  //         ctx.int_val(0));
+  //   s.add(ctx.bool_const((string("b_2_path_") + tag).c_str()));
+  // }
 
   //  same initial memory for all four runs
   expr m_c1 = ctx.constant("c_1_Global_M_correct_C1", arr);
   expr m_f1 = ctx.constant("c_1_Global_M_faulty_F1", arr);
   expr m_c2 = ctx.constant("c_1_Global_M_correct_C2", arr);
   expr m_f2 = ctx.constant("c_1_Global_M_faulty_F2", arr);
-  s.add(m_c1 == m_f1);
-  s.add(m_c1 == m_c2);
-  s.add(m_c1 == m_f2);
+  // s.add(m_c1 == m_f1);
+  // s.add(m_c1 == m_c2);
+  // s.add(m_c1 == m_f2);
 
   //  memory value constraints ─
   // The relevant cells must be non-zero so results are not trivially equal.
   s.add(select(m_c1, vdec) != ctx.bv_val(0, 8));
+  s.add(select(m_c1, vdec) != ctx.bv_val(0, 8));
+  s.add(select(m_c1, vdec) != select(m_c1, ox1 + ctx.int_val(780)));
   // s.add(select(m_c1, ox1 + ctx.int_val(780)) != ctx.bv_val(0, 8));
   // s.add(select(m_c1, ox2 + ctx.int_val(780)) != ctx.bv_val(0, 8));
   // The two key cells must differ so that the XOR result distinguishes them.
@@ -251,10 +253,10 @@ int main(int argc, char **argv) {
   // The fault lands at offset 0 of the XOR loop: index (858 + s).
   expr out_idx = sv + ctx.int_val(858);
 
-  expr s1_c = select(ctx.constant("c_14_Global_M_correct_C1", arr), out_idx);
-  expr s1_f = select(ctx.constant("c_14_Global_M_faulty_F1", arr), out_idx);
-  expr s2_c = select(ctx.constant("c_14_Global_M_correct_C2", arr), out_idx);
-  expr s2_f = select(ctx.constant("c_14_Global_M_faulty_F2", arr), out_idx);
+  expr s1_c = select(ctx.constant("c_1_Global_M_correct_C1", arr), out_idx);
+  expr s1_f = select(ctx.constant("c_1_Global_M_faulty_F1", arr), out_idx);
+  expr s2_c = select(ctx.constant("c_1_Global_M_correct_C2", arr), out_idx);
+  expr s2_f = select(ctx.constant("c_1_Global_M_faulty_F2", arr), out_idx);
 
   // Correct outputs must be non-zero (ensures genuine computation happened).
   s.add(s1_c != ctx.bv_val(0, 8));
@@ -285,8 +287,7 @@ int main(int argc, char **argv) {
 
   cout << "M[Vdec]    = " << ev(select(mem, vdec)) << "\n";
   cout << "M[780+Ox1] = " << ev(select(mem, ox1 + ctx.int_val(780))) << "\n";
-  cout << "M[780+Ox2] = " << ev(select(mem, ox2 + ctx.int_val(780))) <<
-  "\n\n";
+  cout << "M[780+Ox2] = " << ev(select(mem, ox2 + ctx.int_val(780))) << "\n\n";
 
   cout << "ineffective fault (Ox1):\n";
   cout << "  s1_correct = " << ev(s1_c) << "\n";

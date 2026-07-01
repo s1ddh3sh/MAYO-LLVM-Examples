@@ -26,7 +26,7 @@ endif()
 
 add_executable(loop_fn_Fault loop_fn_Fault.cpp)
 add_executable(binOpFault binOpFault.cpp)
-add_executable(smt_parser3 ../smt_parser3.cpp)
+add_executable(smt_parser ../smt_parser_main.cpp)
 
 # Map needed LLVM components to library names
 llvm_map_components_to_libnames(LLVM_LIBS
@@ -49,12 +49,12 @@ target_link_libraries(binOpFault
   ${LLVM_LIBS}
 )
 
-target_link_libraries(smt_parser3
+target_link_libraries(smt_parser
   PRIVATE
   ${Z3_LIBRARIES}
 )
 
-target_include_directories(smt_parser3
+target_include_directories(smt_parser
   PRIVATE
   ${Z3_INCLUDE_DIRS}
 )
