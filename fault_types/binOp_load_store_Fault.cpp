@@ -30,12 +30,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
-// #include <llvm-20/llvm/ADT/SmallVector.h>
-// #include <llvm-20/llvm/IR/Function.h>
-// #include <llvm-20/llvm/IR/InstrTypes.h>
-// #include <llvm-20/llvm/IR/Instruction.h>
-// #include <llvm-20/llvm/Support/Casting.h>
-// #include <llvm-20/llvm/Transforms/Utils/ValueMapper.h>
 
 #include "json_parser.h"
 #include <memory>
@@ -419,11 +413,57 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
   errs() << "Created driver function for " << TargetF->getName() << "\n";
 }
 
-enum class FaultModel { Undef, Zero, OpB, OpC };
+enum class FaultModel { Undef, Zero, OpB, OpC, Mem };
+static Instruction *getInstByIndex(Function &F, unsigned targetInst) {
+  unsigned idx = 0;
+  for (BasicBlock &BB : F) {
+    for (Instruction &I : BB) {
+      if (idx == targetInst)
+        return &I;
+      ++idx;
+    }
+  }
+  return nullptr;
+}
 
-class SkipBinOpPass : public PassInfoMixin<SkipBinOpPass> {
+struct InstLocator {
+  bool hasDbg = false;
+  unsigned dbgLine = 0;
+  unsigned dbgCol = 0;
+  unsigned fallbackIndex = 0; // used only if no debug info is available
+};
+
+static InstLocator captureInstLocator(Instruction *I, unsigned idxInFunction) {
+  InstLocator loc;
+  loc.fallbackIndex = idxInFunction;
+  if (DebugLoc DL = I->getDebugLoc()) {
+    loc.hasDbg = true;
+    loc.dbgLine = DL.getLine();
+    loc.dbgCol = DL.getCol();
+  }
+  return loc;
+}
+
+static Instruction *findInstByLocator(Function &F, const InstLocator &loc) {
+  if (loc.hasDbg) {
+    for (BasicBlock &BB : F) {
+      for (Instruction &I : BB) {
+        if (DebugLoc DL = I.getDebugLoc()) {
+          if (DL.getLine() == loc.dbgLine && DL.getCol() == loc.dbgCol)
+            return &I;
+        }
+      }
+    }
+    errs() << "Warning: no instruction with debug loc " << loc.dbgLine << ":"
+           << loc.dbgCol << " found; falling back to index "
+           << loc.fallbackIndex << "\n";
+  }
+  return getInstByIndex(F, loc.fallbackIndex);
+}
+
+class FaultInjectionPass : public PassInfoMixin<FaultInjectionPass> {
   FaultModel FM;
-  int line;
+  InstLocator loc;
   static std::string valueName(Value *V) {
     if (V->hasName())
       return "%" + V->getName().str();
@@ -432,6 +472,7 @@ class SkipBinOpPass : public PassInfoMixin<SkipBinOpPass> {
     V->printAsOperand(os, false);
     return os.str();
   }
+
   static Instruction *getInst(Function &F, unsigned targetInst) {
     unsigned idx = 0;
 
@@ -447,24 +488,22 @@ class SkipBinOpPass : public PassInfoMixin<SkipBinOpPass> {
   }
 
 public:
-  explicit SkipBinOpPass(FaultModel FM = FaultModel::OpB, int line = 0)
-      : FM(FM), line(line) {}
+  explicit FaultInjectionPass(FaultModel FM, InstLocator loc)
+      : FM(FM), loc(loc) {}
 
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &) {
 
     bool modified = false;
 
-    Instruction *I = getInst(F, line);
+    Instruction *I = findInstByLocator(F, loc);
     // outs() << *I;
     if (!I) {
-      errs() << "No instruction found at line " << line << "\n";
+      errs() << "No instruction found for locator\n";
       // errs() << M;
       return PreservedAnalyses::all();
     }
     if (auto *binOp = dyn_cast<BinaryOperator>(I)) {
 
-      Value *b = binOp->getOperand(0);
-      Value *c = binOp->getOperand(1);
       Type *ty = binOp->getType();
 
       Value *faulty = nullptr;
@@ -485,16 +524,29 @@ public:
       case FaultModel::OpB:
         binOp->setOperand(0, ConstantInt::get(ty, 0));
         modified = true;
-        goto done;
         break;
       case FaultModel::OpC:
         binOp->setOperand(1, ConstantInt::get(ty, 0));
         modified = true;
-        goto done;
+        break;
+      case FaultModel::Mem:
+        break;
+      }
+    } else if (auto *load = dyn_cast<LoadInst>(I)) {
+      if (FM == FaultModel::Mem) {
+        Type *ty = load->getType();
+        Value *faulty = Constant::getNullValue(ty);
+        load->replaceAllUsesWith(faulty);
+        load->eraseFromParent();
+        modified = true;
+      }
+    } else if (auto *store = dyn_cast<StoreInst>(I)) {
+      if (FM == FaultModel::Mem) {
+        store->eraseFromParent();
+        modified = true;
       }
     }
 
-  done:
     if (modified)
       return PreservedAnalyses::none();
     else
@@ -730,6 +782,37 @@ int main(int argc, char **argv) {
                                   testcase);
     }
   }
+
+  Function *preOptF = funcModule->getFunction(funcName);
+  if (!preOptF) {
+    errs() << "Function not found in extracted module: " << funcName << "\n";
+    return 1;
+  }
+  Instruction *origInst = getInstByIndex(*preOptF, line);
+  if (!origInst) {
+    errs() << "No instruction found at line " << line
+           << " in extracted (pre-optimization) function\n";
+    return 1;
+  }
+  // Decide the fault category from the ORIGINAL instruction, before any
+  // transformation can change its opcode or position.
+  bool isBinOp = isa<BinaryOperator>(origInst);
+  bool isLoadOrStore = isa<LoadInst>(origInst) || isa<StoreInst>(origInst);
+
+  if (!isBinOp && !isLoadOrStore) {
+    errs() << "Instruction at line " << line
+           << " is neither BinOp, LoadInst, nor StoreInst ("
+           << origInst->getOpcodeName() << "); skipping fault injection\n";
+    return 0;
+  }
+
+  InstLocator locator = captureInstLocator(origInst, line);
+  if (!locator.hasDbg) {
+    errs() << "Warning: instruction at line " << line
+           << " has no debug location; post-optimization re-lookup will "
+              "fall back to raw index and may be unreliable.\n";
+  }
+
   // outs() << *funcModule;
   auto makePB = [&](Module &M, auto buildPipeline) {
     LoopAnalysisManager LAM;
@@ -817,11 +900,10 @@ int main(int argc, char **argv) {
     errs() << "Invalid IR\n";
     return 1;
   }
-  std::string filename = "../results/" + funcName + "/" ;
+  std::string filename = "../results/" + funcName + "/";
   // std::string filename = "../results/" + funcName + ".ll";
   dump_module(*funcModule, filename + funcName + ".ll");
-  outs() << "Wrote" << filename << "\n";
-
+  outs() << "Wrote" << filename << funcName << "\n";
 
   // auto mod = parseIRFile("original.ll", err, ctx);
   // outs() << *funcModule;
@@ -833,13 +915,22 @@ int main(int argc, char **argv) {
     const char *name;
   };
 
-  FaultEntry faults[] = {
-      {FaultModel::Undef, "undef"},
-      {FaultModel::Zero, "zero"},
-      {FaultModel::OpB, "opB"},
-      {FaultModel::OpC, "opC"},
-  };
-
+  std::vector<FaultEntry> faults;
+  std::string faultSubdir;
+  if (isBinOp) {
+    faults = {
+        {FaultModel::Undef, "undef"},
+        {FaultModel::Zero, "zero"},
+        {FaultModel::OpB, "opB"},
+        {FaultModel::OpC, "opC"},
+    };
+    faultSubdir = "binOpFault/";
+  } else { // isLoadOrStore
+    faults = {
+        {FaultModel::Mem, "mem"},
+    };
+    faultSubdir = "loadStoreSkip/";
+  } 
   for (auto &fe : faults) {
 
     auto cloned = CloneModule(*funcModule);
@@ -858,7 +949,7 @@ int main(int argc, char **argv) {
 
     FunctionPassManager FPM;
     FPM.addPass(PromotePass());
-    FPM.addPass(SkipBinOpPass(fe.model, line));
+    FPM.addPass(FaultInjectionPass(fe.model, locator));
     Function *TargetF = cloned->getFunction(funcName);
 
     if (!TargetF) {
@@ -868,8 +959,10 @@ int main(int argc, char **argv) {
 
     FPM.run(*TargetF, FAM);
 
-    std::string llFile = filename + "binOpFault/" + funcName + "_line" +  argv[3] + "_" + fe.name + ".ll";
-    std::string smt2File = filename + "binOpFault/" + funcName + "_line" +  argv[3] + "_" + fe.name + ".smt2";
+    std::string llFile = filename + faultSubdir + funcName + "_line" + argv[3] +
+                         "_" + fe.name + ".ll";
+    std::string smt2File = filename + faultSubdir + funcName + "_line" +
+                           argv[3] + "_" + fe.name + ".smt2";
 
     dump_module(*cloned, llFile);
     outs() << "Wrote " << llFile << "\n";

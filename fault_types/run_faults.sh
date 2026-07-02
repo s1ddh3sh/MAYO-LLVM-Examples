@@ -43,7 +43,7 @@ if [ ${#JSON_FILES[@]} -eq 0 ]; then
 fi
 
 cd build || { echo "Error: could not cd into build" >&2; exit 1; }
-
+make -j$(nproc)
 for jsonfile in "${JSON_FILES[@]}"; do
   filename="$(basename "$jsonfile" .json)"
 
@@ -66,9 +66,9 @@ for jsonfile in "${JSON_FILES[@]}"; do
         ./loop_fn_Fault "$IR_FILE" 1 "$filename" "$callee"
         ;;
 
-      BinOp)
-        echo "  [run] ./binOpFault $IR_FILE $filename $line_no"
-        ./binOpFault "$IR_FILE" "$filename" "$line_no"
+      BinOp|LoadInst|StoreInst)
+        echo "  [run] ./binOp_load_store_Fault $IR_FILE $filename $line_no"
+        ./binOp_load_store_Fault "$IR_FILE" "$filename" "$line_no"
         ;;
 
       *)
