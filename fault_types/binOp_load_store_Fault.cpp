@@ -26,6 +26,11 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/Mem2Reg.h"
 
+#include "llvm/Analysis/LoopAnalysisManager.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
+
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -59,6 +64,163 @@ std::string run_command_capture(const std::string &cmd, int &exitCode) {
   exitCode = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
   return output;
 }
+
+class LabeledUnrollPass : public PassInfoMixin<LabeledUnrollPass> {
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
+
+    auto &LI = FAM.getResult<LoopAnalysis>(F);
+    auto &SE = FAM.getResult<ScalarEvolutionAnalysis>(F);
+
+    std::vector<Loop *> loops(LI.begin(), LI.end());
+    for (Loop *L : loops) {
+      unsigned tripCount = SE.getSmallConstantTripCount(L);
+      if (tripCount == 0) {
+        errs() << "cannot determine trip count\n";
+        continue;
+      }
+
+      errs() << "Loop trip count: " << tripCount << "\n";
+      addLabelNUnroll(F, L, LI, SE, tripCount);
+    }
+    return PreservedAnalyses::none();
+  }
+
+  void addLabelNUnroll(Function &F, Loop *L, LoopInfo &LI, ScalarEvolution &SE,
+                       unsigned tripCount) {
+    BasicBlock *header = L->getHeader();
+    BasicBlock *latch = L->getLoopLatch();
+    BasicBlock *preheader = L->getLoopPreheader();
+    BasicBlock *exitBB = L->getUniqueExitBlock();
+
+    if (!header || !latch || !preheader || !exitBB) {
+      errs() << "Loop not in simplified form\n";
+      return;
+    }
+
+    std::vector<BasicBlock *> origBlocks;
+    for (BasicBlock *BB : L->blocks()) {
+      origBlocks.push_back(BB);
+    }
+
+    BasicBlock *prevIterExit = preheader;
+    ValueToValueMapTy cumulativeMap;
+
+    for (unsigned i = 0; i < tripCount; i++) {
+      BasicBlock *iterStart = BasicBlock::Create(
+          F.getContext(), "iter_" + std::to_string(i) + "_start", &F);
+
+      std::vector<std::pair<PHINode *, Value *>> resolvedPhis;
+      for (PHINode &PN : header->phis()) {
+        Value *incoming;
+        if (i == 0) {
+          incoming = PN.getIncomingValueForBlock(preheader);
+        } else {
+          Value *latchVal = PN.getIncomingValueForBlock(latch);
+          if (Value *mapped = cumulativeMap.lookup(latchVal))
+            incoming = mapped;
+          else
+            incoming = latchVal;
+        }
+        cumulativeMap[&PN] = incoming;
+        resolvedPhis.push_back({&PN, incoming});
+      }
+
+      std::vector<BasicBlock *> iterationCloned;
+      ValueToValueMapTy iterationBlockMap;
+      for (BasicBlock *BB : origBlocks) {
+        BasicBlock *cloned =
+            CloneBasicBlock(BB, cumulativeMap, ".iter" + std::to_string(i), &F);
+        iterationCloned.push_back(cloned);
+        iterationBlockMap[BB] = cloned;
+
+        auto itOrig = BB->begin();
+        auto itCloned = cloned->begin();
+        while (itOrig != BB->end() && itCloned != cloned->end()) {
+          iterationBlockMap[&*itOrig] = &*itCloned;
+          cumulativeMap[&*itOrig] = &*itCloned;
+          itOrig++;
+          itCloned++;
+        }
+      }
+
+      for (BasicBlock *cloned : iterationCloned) {
+        for (Instruction &I : *cloned) {
+          RemapInstruction(&I, iterationBlockMap,
+                           RF_NoModuleLevelChanges | RF_IgnoreMissingLocals);
+        }
+      }
+
+      for (auto &pair : resolvedPhis) {
+        PHINode *origPhi = pair.first;
+        Value *resolvedVal = pair.second;
+        if (Value *clonedPhiVal = iterationBlockMap.lookup(origPhi)) {
+          PHINode *clonedPhi = cast<PHINode>(clonedPhiVal);
+          clonedPhi->replaceAllUsesWith(resolvedVal);
+          clonedPhi->eraseFromParent();
+        }
+      }
+
+      BasicBlock *iterEnd = BasicBlock::Create(
+          F.getContext(), "iter_" + std::to_string(i) + "_end", &F);
+
+      if (i == 0) {
+        Instruction *prevTerm = preheader->getTerminator();
+        BranchInst::Create(iterStart, preheader);
+        prevTerm->eraseFromParent();
+      } else {
+        BranchInst::Create(iterStart, prevIterExit);
+      }
+
+      BranchInst::Create(iterationCloned.front(), iterStart);
+
+      BasicBlock *clonedLatch = cast<BasicBlock>(iterationBlockMap[latch]);
+      Instruction *latchTerm = clonedLatch->getTerminator();
+      BranchInst::Create(iterEnd, clonedLatch);
+      latchTerm->eraseFromParent();
+
+      prevIterExit = iterEnd;
+    }
+
+    BranchInst::Create(exitBB, prevIterExit);
+    for (auto it = exitBB->begin(); isa<PHINode>(it);) {
+      PHINode *PN = cast<PHINode>(&*it++);
+      Value *incomingVal = nullptr;
+
+      for (unsigned j = 0; j < PN->getNumIncomingValues(); j++) {
+        if (L->contains(PN->getIncomingBlock(j))) {
+          incomingVal = PN->getIncomingValue(j);
+          break;
+        }
+      }
+
+      if (!incomingVal)
+        continue;
+
+      if (Value *mapped = cumulativeMap.lookup(incomingVal))
+        incomingVal = mapped;
+
+      while (true) {
+        bool removed = false;
+        for (unsigned j = 0; j < PN->getNumIncomingValues(); j++) {
+          if (L->contains(PN->getIncomingBlock(j))) {
+            PN->removeIncomingValue(j, false);
+            removed = true;
+            break;
+          }
+        }
+        if (!removed)
+          break;
+      }
+
+      PN->addIncoming(incomingVal, prevIterExit);
+    }
+
+    for (BasicBlock *BB : origBlocks) {
+      BB->eraseFromParent();
+    }
+  }
+};
 
 /// Trace a value backwards to its original AllocaInst, GlobalVariable, or
 /// Constant.
@@ -444,15 +606,38 @@ static InstLocator captureInstLocator(Instruction *I, unsigned idxInFunction) {
   return loc;
 }
 
+static bool isFirstIterationBlock(const BasicBlock &BB) {
+  StringRef name = BB.getName();
+  if (name == "iter_0_start" || name == "iter_0_end")
+    return true;
+  if (name.ends_with(".iter0"))
+    return true;
+  return false;
+}
+
 static Instruction *findInstByLocator(Function &F, const InstLocator &loc) {
   if (loc.hasDbg) {
+    Instruction *firstIterMatch = nullptr;
+    Instruction *anyMatch = nullptr;
+
     for (BasicBlock &BB : F) {
       for (Instruction &I : BB) {
-        if (DebugLoc DL = I.getDebugLoc()) {
-          if (DL.getLine() == loc.dbgLine && DL.getCol() == loc.dbgCol)
-            return &I;
-        }
+        DebugLoc DL = I.getDebugLoc();
+        if (!DL || DL.getLine() != loc.dbgLine || DL.getCol() != loc.dbgCol)
+          continue;
+
+        if (!anyMatch)
+          anyMatch = &I;
+        if (!firstIterMatch && isFirstIterationBlock(BB))
+          firstIterMatch = &I;
       }
+    }
+
+    if (firstIterMatch)
+      return firstIterMatch;
+
+    if (anyMatch) {
+      return anyMatch;
     }
     errs() << "Warning: no instruction with debug loc " << loc.dbgLine << ":"
            << loc.dbgCol << " found; falling back to index "
@@ -860,6 +1045,7 @@ int main(int argc, char **argv) {
       FPM.addPass(LCSSAPass());
       FPM.addPass(createFunctionToLoopPassAdaptor(LoopRotatePass()));
       FPM.addPass(createFunctionToLoopPassAdaptor(IndVarSimplifyPass()));
+      FPM.addPass(LabeledUnrollPass());
       FPM.addPass(SCCPPass());
       FPM.addPass(PromotePass());
       MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
@@ -930,7 +1116,7 @@ int main(int argc, char **argv) {
         {FaultModel::Mem, "mem"},
     };
     faultSubdir = "loadStoreSkip/";
-  } 
+  }
   for (auto &fe : faults) {
 
     auto cloned = CloneModule(*funcModule);
