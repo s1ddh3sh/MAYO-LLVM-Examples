@@ -1128,11 +1128,13 @@ int main(int argc, char **argv) {
     errs() << "Invalid IR after LabeledUnrollPass\n";
     return 1;
   }
+  std::string filename = "../results/" + funcName + ".ll";
 
-  dump_module(*funcModule, "../results/original.ll");
+  dump_module(*funcModule, filename);
   outs() << "Wrote original.ll\n";
 
   // Clone and inject fault
+  filename = "../results/loopOrFuncSkip/" + funcName;
 
   if (mode == LOOP_SKIP) {
     auto faultModule = CloneModule(*funcModule);
@@ -1236,7 +1238,7 @@ int main(int argc, char **argv) {
     if (verifyModule(*faultModule, &errs())) {
       errs() << "Fault module has invalid IR\n";
     } else {
-      dump_module(*faultModule, "../results/loopOrFuncSkip/loopSkip.ll");
+      dump_module(*faultModule, filename + "_loopSkip.ll");
       outs() << "Wrote loopSkip.ll\n";
     }
 
@@ -1300,7 +1302,7 @@ int main(int argc, char **argv) {
     if (verifyModule(*preUnrollClone, &errs())) {
       errs() << "Fault module has invalid IR\n";
     } else {
-      dump_module(*preUnrollClone, "../results/loopOrFuncSkip/funcSkip.ll");
+      dump_module(*preUnrollClone, filename + "_funcSkip.ll");
       outs() << "Wrote funcSkip.ll\n";
     }
 
