@@ -1,4 +1,10 @@
 {
-  "6": "  %arrayidx1 = getelementptr inbounds nuw i8, ptr %dst, i32 %i.0, !dbg !151",
-  "7": "  store i8 %0, ptr %arrayidx1, align 1, !dbg !152"
+  "6": {
+    "instr": "  %arrayidx1 = getelementptr inbounds nuw i8, ptr %dst, i32 %i.0, !dbg !151",
+    "type": "GetElementPtrInst"
+  },
+  "7": {
+    "instr": "  store i8 %0, ptr %arrayidx1, align 1, !dbg !152",
+    "type": "StoreInst"
+  }
 }

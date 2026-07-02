@@ -817,9 +817,11 @@ int main(int argc, char **argv) {
     errs() << "Invalid IR\n";
     return 1;
   }
-  std::string filename = "../results/" + funcName + ".ll";
-  dump_module(*funcModule, filename);
-  outs() << "Wrote original.ll\n";
+  std::string filename = "../results/" + funcName + "/" ;
+  // std::string filename = "../results/" + funcName + ".ll";
+  dump_module(*funcModule, filename + funcName + ".ll");
+  outs() << "Wrote" << filename << "\n";
+
 
   // auto mod = parseIRFile("original.ll", err, ctx);
   // outs() << *funcModule;
@@ -866,10 +868,8 @@ int main(int argc, char **argv) {
 
     FPM.run(*TargetF, FAM);
 
-    std::string llFile = std::string("../results/binOpSkip/faulty_") +
-                         funcName + "_" + fe.name + ".ll";
-    std::string smt2File = std::string("../results/binOpSkip/faulty_") +
-                           funcName + "_" + fe.name + ".smt2";
+    std::string llFile = filename + "binOpFault/" + funcName + "_line" +  argv[3] + "_" + fe.name + ".ll";
+    std::string smt2File = filename + "binOpFault/" + funcName + "_line" +  argv[3] + "_" + fe.name + ".smt2";
 
     dump_module(*cloned, llFile);
     outs() << "Wrote " << llFile << "\n";

@@ -1,3 +1,7 @@
 {
-  "1": "  call fastcc void @keccak_squeezeblocks(ptr noundef %output, i32 noundef %nblocks, ptr noundef %0, i32 noundef 136) #4, !dbg !141"
+  "1": {
+    "instr": "  call fastcc void @keccak_squeezeblocks(ptr noundef %output, i32 noundef %nblocks, ptr noundef %0, i32 noundef 136) #4, !dbg !141",
+    "type": "CallInst",
+    "callee": "keccak_squeezeblocks"
+  }
 }

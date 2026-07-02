@@ -1,50 +1,228 @@
 {
-  "4": "  %V = alloca [430 x i8], align 1",
-  "5": "  %Vdec = alloca [780 x i8], align 1",
-  "10": "  %sk = alloca [18603 x i64], align 32",
-  "11": "  %Ox = alloca [78 x i8], align 1",
-  "14": "  call void @mayo_memset(ptr %A, i8 0, i32 6480), !dbg !200",
-  "15": "  call void @mayo_memset(ptr %r, i8 0, i32 81), !dbg !210",
-  "16": "  %call = call i32 @pqmayo_MAYO_1_ref_mayo_expand_sk(ptr noundef %p, ptr noundef %csk, ptr noundef nonnull %sk) #4, !dbg !237",
-  "17": "  call void @shake256(ptr noundef nonnull %tmp, i32 noundef 32, ptr noundef %m, i32 noundef %mlen) #4, !dbg !239",
-  "18": "  call void @mayo_memset(ptr %Mtmp, i8 0, i32 3200), !dbg !246",
-  "20": "  %call6 = call i32 @randombytes(ptr noundef nonnull %add.ptr5, i32 noundef 24) #4, !dbg !249",
-  "22": "  %call13 = call ptr @memcpy(ptr noundef nonnull %add.ptr12, ptr noundef %csk, i32 noundef 24) #5, !dbg !251",
-  "23": "  call void @shake256(ptr noundef nonnull %salt, i32 noundef 24, ptr noundef nonnull %tmp, i32 noundef 80) #4, !dbg !252",
-  "25": "  %call20 = call ptr @memcpy(ptr noundef nonnull %add.ptr18, ptr noundef nonnull %salt, i32 noundef 24) #5, !dbg !254",
-  "27": "  call void @shake256(ptr noundef nonnull %tenc, i32 noundef 39, ptr noundef nonnull %tmp, i32 noundef 56) #4, !dbg !257",
-  "28": "  call fastcc void @decode(ptr noundef nonnull %tenc, ptr noundef nonnull %t, i32 noundef 78) #4, !dbg !258",
-  "29": "  store i8 0, ptr %add.ptr24, align 1, !dbg !259",
-  "30": "  call void @shake256(ptr noundef nonnull %V, i32 noundef 430, ptr noundef nonnull %tmp, i32 noundef 81) #4, !dbg !260",
-  "36": "  %add.ptr35 = getelementptr inbounds nuw i8, ptr %V, i32 %mul, !dbg !271",
-  "38": "  %add.ptr38 = getelementptr inbounds nuw i8, ptr %Vdec, i32 %mul37, !dbg !273",
-  "39": "  call fastcc void @decode(ptr noundef nonnull %add.ptr35, ptr noundef nonnull %add.ptr38, i32 noundef 78) #4, !dbg !274",
-  "42": "  %add.ptr = getelementptr inbounds nuw i8, ptr %sk, i32 123240, !dbg !280",
-  "43": "  call fastcc void @compute_M_and_VPV(ptr noundef %p, ptr noundef nonnull %Vdec, ptr noundef nonnull %add.ptr, ptr noundef nonnull %sk, ptr noundef nonnull %Mtmp, ptr noundef nonnull %A) #4, !dbg !281",
-  "44": "  call fastcc void @compute_rhs(ptr noundef %p, ptr noundef nonnull %A, ptr noundef nonnull %t, ptr noundef nonnull %y) #4, !dbg !282",
-  "45": "  call fastcc void @compute_A(ptr noundef %p, ptr noundef nonnull %Mtmp, ptr noundef nonnull %A) #4, !dbg !283",
-  "53": "  store i8 0, ptr %arrayidx, align 1, !dbg !296",
-  "56": "  %add.ptr56 = getelementptr inbounds nuw i8, ptr %V, i32 390, !dbg !301",
-  "57": "  call fastcc void @decode(ptr noundef nonnull %add.ptr56, ptr noundef nonnull %r, i32 noundef 80) #4, !dbg !302",
-  "58": "  %call62 = call i32 @pqmayo_MAYO_1_ref_sample_solution(ptr noundef %p, ptr noundef nonnull %A, ptr noundef nonnull %y, ptr noundef nonnull %r, ptr noundef nonnull %x, i32 noundef 10, i32 noundef 8, i32 noundef 78, i32 noundef 81) #4, !dbg !303",
-  "61": "  %call65 = call ptr @memset(ptr noundef nonnull %Mtmp, i32 noundef 0, i32 noundef 3200) #5, !dbg !305",
-  "62": "  %call67 = call ptr @memset(ptr noundef nonnull %A, i32 noundef 0, i32 noundef 6480) #5, !dbg !307",
-  "69": "  %add.ptr75 = getelementptr inbounds nuw i8, ptr %Vdec, i32 %mul74, !dbg !318",
-  "70": "  %add.ptr78 = getelementptr inbounds nuw i8, ptr %sk, i32 148200, !dbg !320",
-  "73": "  call fastcc void @mat_mul(ptr noundef nonnull %add.ptr78, ptr noundef nonnull %add.ptr81, ptr noundef nonnull %Ox, i32 noundef 8, i32 noundef 78, i32 noundef 1) #4, !dbg !323",
-  "76": "  call fastcc void @mat_add(ptr noundef nonnull %add.ptr75, ptr noundef nonnull %Ox, ptr noundef nonnull %add.ptr86, i32 noundef 78, i32 noundef 1) #4, !dbg !326",
-  "82": "  %call94 = call ptr @memcpy(ptr noundef nonnull %add.ptr90, ptr noundef nonnull %add.ptr93, i32 noundef 8) #5, !dbg !332",
-  "85": "  call fastcc void @encode(ptr noundef nonnull %s, ptr noundef %sig, i32 noundef 860) #4, !dbg !337",
-  "86": "  %add.ptr100 = getelementptr inbounds nuw i8, ptr %sig, i32 430, !dbg !338",
-  "87": "  %call102 = call ptr @memcpy(ptr noundef nonnull %add.ptr100, ptr noundef nonnull %salt, i32 noundef 24) #5, !dbg !339",
-  "89": "  call void @mayo_secure_clear(ptr noundef nonnull %V, i32 noundef 430) #4, !dbg !343",
-  "90": "  call void @mayo_secure_clear(ptr noundef nonnull %Vdec, i32 noundef 780) #4, !dbg !344",
-  "91": "  call void @mayo_secure_clear(ptr noundef nonnull %A, i32 noundef 6480) #4, !dbg !345",
-  "92": "  call void @mayo_secure_clear(ptr noundef nonnull %r, i32 noundef 81) #4, !dbg !346",
-  "93": "  %add.ptr109 = getelementptr inbounds nuw i8, ptr %sk, i32 148200, !dbg !347",
-  "94": "  call void @mayo_secure_clear(ptr noundef nonnull %add.ptr109, i32 noundef 624) #4, !dbg !348",
-  "95": "  call void @mayo_secure_clear(ptr noundef nonnull %sk, i32 noundef 148824) #4, !dbg !349",
-  "96": "  call void @mayo_secure_clear(ptr noundef nonnull %Ox, i32 noundef 78) #4, !dbg !350",
-  "97": "  call void @mayo_secure_clear(ptr noundef nonnull %tmp, i32 noundef 81) #4, !dbg !351",
-  "98": "  call void @mayo_secure_clear(ptr noundef nonnull %Mtmp, i32 noundef 3200) #4, !dbg !352"
+  "4": {
+    "instr": "  %V = alloca [430 x i8], align 1",
+    "type": "AllocaInst"
+  },
+  "5": {
+    "instr": "  %Vdec = alloca [780 x i8], align 1",
+    "type": "AllocaInst"
+  },
+  "10": {
+    "instr": "  %sk = alloca [18603 x i64], align 32",
+    "type": "AllocaInst"
+  },
+  "11": {
+    "instr": "  %Ox = alloca [78 x i8], align 1",
+    "type": "AllocaInst"
+  },
+  "14": {
+    "instr": "  call void @mayo_memset(ptr %A, i8 0, i32 6480), !dbg !200",
+    "type": "CallInst",
+    "callee": "mayo_memset"
+  },
+  "15": {
+    "instr": "  call void @mayo_memset(ptr %r, i8 0, i32 81), !dbg !210",
+    "type": "CallInst",
+    "callee": "mayo_memset"
+  },
+  "16": {
+    "instr": "  %call = call i32 @pqmayo_MAYO_1_ref_mayo_expand_sk(ptr noundef %p, ptr noundef %csk, ptr noundef nonnull %sk) #4, !dbg !237",
+    "type": "CallInst",
+    "callee": "pqmayo_MAYO_1_ref_mayo_expand_sk"
+  },
+  "17": {
+    "instr": "  call void @shake256(ptr noundef nonnull %tmp, i32 noundef 32, ptr noundef %m, i32 noundef %mlen) #4, !dbg !239",
+    "type": "CallInst",
+    "callee": "shake256"
+  },
+  "18": {
+    "instr": "  call void @mayo_memset(ptr %Mtmp, i8 0, i32 3200), !dbg !246",
+    "type": "CallInst",
+    "callee": "mayo_memset"
+  },
+  "20": {
+    "instr": "  %call6 = call i32 @randombytes(ptr noundef nonnull %add.ptr5, i32 noundef 24) #4, !dbg !249",
+    "type": "CallInst",
+    "callee": "randombytes"
+  },
+  "22": {
+    "instr": "  %call13 = call ptr @memcpy(ptr noundef nonnull %add.ptr12, ptr noundef %csk, i32 noundef 24) #5, !dbg !251",
+    "type": "CallInst",
+    "callee": "memcpy"
+  },
+  "23": {
+    "instr": "  call void @shake256(ptr noundef nonnull %salt, i32 noundef 24, ptr noundef nonnull %tmp, i32 noundef 80) #4, !dbg !252",
+    "type": "CallInst",
+    "callee": "shake256"
+  },
+  "25": {
+    "instr": "  %call20 = call ptr @memcpy(ptr noundef nonnull %add.ptr18, ptr noundef nonnull %salt, i32 noundef 24) #5, !dbg !254",
+    "type": "CallInst",
+    "callee": "memcpy"
+  },
+  "27": {
+    "instr": "  call void @shake256(ptr noundef nonnull %tenc, i32 noundef 39, ptr noundef nonnull %tmp, i32 noundef 56) #4, !dbg !257",
+    "type": "CallInst",
+    "callee": "shake256"
+  },
+  "28": {
+    "instr": "  call fastcc void @decode(ptr noundef nonnull %tenc, ptr noundef nonnull %t, i32 noundef 78) #4, !dbg !258",
+    "type": "CallInst",
+    "callee": "decode"
+  },
+  "29": {
+    "instr": "  store i8 0, ptr %add.ptr24, align 1, !dbg !259",
+    "type": "StoreInst"
+  },
+  "30": {
+    "instr": "  call void @shake256(ptr noundef nonnull %V, i32 noundef 430, ptr noundef nonnull %tmp, i32 noundef 81) #4, !dbg !260",
+    "type": "CallInst",
+    "callee": "shake256"
+  },
+  "36": {
+    "instr": "  %add.ptr35 = getelementptr inbounds nuw i8, ptr %V, i32 %mul, !dbg !271",
+    "type": "GetElementPtrInst"
+  },
+  "38": {
+    "instr": "  %add.ptr38 = getelementptr inbounds nuw i8, ptr %Vdec, i32 %mul37, !dbg !273",
+    "type": "GetElementPtrInst"
+  },
+  "39": {
+    "instr": "  call fastcc void @decode(ptr noundef nonnull %add.ptr35, ptr noundef nonnull %add.ptr38, i32 noundef 78) #4, !dbg !274",
+    "type": "CallInst",
+    "callee": "decode"
+  },
+  "42": {
+    "instr": "  %add.ptr = getelementptr inbounds nuw i8, ptr %sk, i32 123240, !dbg !280",
+    "type": "GetElementPtrInst"
+  },
+  "43": {
+    "instr": "  call fastcc void @compute_M_and_VPV(ptr noundef %p, ptr noundef nonnull %Vdec, ptr noundef nonnull %add.ptr, ptr noundef nonnull %sk, ptr noundef nonnull %Mtmp, ptr noundef nonnull %A) #4, !dbg !281",
+    "type": "CallInst",
+    "callee": "compute_M_and_VPV"
+  },
+  "44": {
+    "instr": "  call fastcc void @compute_rhs(ptr noundef %p, ptr noundef nonnull %A, ptr noundef nonnull %t, ptr noundef nonnull %y) #4, !dbg !282",
+    "type": "CallInst",
+    "callee": "compute_rhs"
+  },
+  "45": {
+    "instr": "  call fastcc void @compute_A(ptr noundef %p, ptr noundef nonnull %Mtmp, ptr noundef nonnull %A) #4, !dbg !283",
+    "type": "CallInst",
+    "callee": "compute_A"
+  },
+  "53": {
+    "instr": "  store i8 0, ptr %arrayidx, align 1, !dbg !296",
+    "type": "StoreInst"
+  },
+  "56": {
+    "instr": "  %add.ptr56 = getelementptr inbounds nuw i8, ptr %V, i32 390, !dbg !301",
+    "type": "GetElementPtrInst"
+  },
+  "57": {
+    "instr": "  call fastcc void @decode(ptr noundef nonnull %add.ptr56, ptr noundef nonnull %r, i32 noundef 80) #4, !dbg !302",
+    "type": "CallInst",
+    "callee": "decode"
+  },
+  "58": {
+    "instr": "  %call62 = call i32 @pqmayo_MAYO_1_ref_sample_solution(ptr noundef %p, ptr noundef nonnull %A, ptr noundef nonnull %y, ptr noundef nonnull %r, ptr noundef nonnull %x, i32 noundef 10, i32 noundef 8, i32 noundef 78, i32 noundef 81) #4, !dbg !303",
+    "type": "CallInst",
+    "callee": "pqmayo_MAYO_1_ref_sample_solution"
+  },
+  "61": {
+    "instr": "  %call65 = call ptr @memset(ptr noundef nonnull %Mtmp, i32 noundef 0, i32 noundef 3200) #5, !dbg !305",
+    "type": "CallInst",
+    "callee": "memset"
+  },
+  "62": {
+    "instr": "  %call67 = call ptr @memset(ptr noundef nonnull %A, i32 noundef 0, i32 noundef 6480) #5, !dbg !307",
+    "type": "CallInst",
+    "callee": "memset"
+  },
+  "69": {
+    "instr": "  %add.ptr75 = getelementptr inbounds nuw i8, ptr %Vdec, i32 %mul74, !dbg !318",
+    "type": "GetElementPtrInst"
+  },
+  "70": {
+    "instr": "  %add.ptr78 = getelementptr inbounds nuw i8, ptr %sk, i32 148200, !dbg !320",
+    "type": "GetElementPtrInst"
+  },
+  "73": {
+    "instr": "  call fastcc void @mat_mul(ptr noundef nonnull %add.ptr78, ptr noundef nonnull %add.ptr81, ptr noundef nonnull %Ox, i32 noundef 8, i32 noundef 78, i32 noundef 1) #4, !dbg !323",
+    "type": "CallInst",
+    "callee": "mat_mul"
+  },
+  "76": {
+    "instr": "  call fastcc void @mat_add(ptr noundef nonnull %add.ptr75, ptr noundef nonnull %Ox, ptr noundef nonnull %add.ptr86, i32 noundef 78, i32 noundef 1) #4, !dbg !326",
+    "type": "CallInst",
+    "callee": "mat_add"
+  },
+  "82": {
+    "instr": "  %call94 = call ptr @memcpy(ptr noundef nonnull %add.ptr90, ptr noundef nonnull %add.ptr93, i32 noundef 8) #5, !dbg !332",
+    "type": "CallInst",
+    "callee": "memcpy"
+  },
+  "85": {
+    "instr": "  call fastcc void @encode(ptr noundef nonnull %s, ptr noundef %sig, i32 noundef 860) #4, !dbg !337",
+    "type": "CallInst",
+    "callee": "encode"
+  },
+  "86": {
+    "instr": "  %add.ptr100 = getelementptr inbounds nuw i8, ptr %sig, i32 430, !dbg !338",
+    "type": "GetElementPtrInst"
+  },
+  "87": {
+    "instr": "  %call102 = call ptr @memcpy(ptr noundef nonnull %add.ptr100, ptr noundef nonnull %salt, i32 noundef 24) #5, !dbg !339",
+    "type": "CallInst",
+    "callee": "memcpy"
+  },
+  "89": {
+    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %V, i32 noundef 430) #4, !dbg !343",
+    "type": "CallInst",
+    "callee": "mayo_secure_clear"
+  },
+  "90": {
+    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %Vdec, i32 noundef 780) #4, !dbg !344",
+    "type": "CallInst",
+    "callee": "mayo_secure_clear"
+  },
+  "91": {
+    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %A, i32 noundef 6480) #4, !dbg !345",
+    "type": "CallInst",
+    "callee": "mayo_secure_clear"
+  },
+  "92": {
+    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %r, i32 noundef 81) #4, !dbg !346",
+    "type": "CallInst",
+    "callee": "mayo_secure_clear"
+  },
+  "93": {
+    "instr": "  %add.ptr109 = getelementptr inbounds nuw i8, ptr %sk, i32 148200, !dbg !347",
+    "type": "GetElementPtrInst"
+  },
+  "94": {
+    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %add.ptr109, i32 noundef 624) #4, !dbg !348",
+    "type": "CallInst",
+    "callee": "mayo_secure_clear"
+  },
+  "95": {
+    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %sk, i32 noundef 148824) #4, !dbg !349",
+    "type": "CallInst",
+    "callee": "mayo_secure_clear"
+  },
+  "96": {
+    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %Ox, i32 noundef 78) #4, !dbg !350",
+    "type": "CallInst",
+    "callee": "mayo_secure_clear"
+  },
+  "97": {
+    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %tmp, i32 noundef 81) #4, !dbg !351",
+    "type": "CallInst",
+    "callee": "mayo_secure_clear"
+  },
+  "98": {
+    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %Mtmp, i32 noundef 3200) #4, !dbg !352",
+    "type": "CallInst",
+    "callee": "mayo_secure_clear"
+  }
 }

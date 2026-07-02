@@ -1,5 +1,17 @@
 {
-  "1": "  call void @mayo_memset(ptr %PS, i8 0, i32 34400), !dbg !175",
-  "2": "  call fastcc void @mayo_generic_m_calculate_PS(ptr noundef %P1, ptr noundef %P2, ptr noundef %P3, ptr noundef %s, i32 noundef 78, i32 noundef 78, i32 noundef 8, i32 noundef 10, ptr noundef nonnull %PS) #4, !dbg !176",
-  "3": "  call fastcc void @mayo_generic_m_calculate_SPS(ptr noundef nonnull %PS, ptr noundef %s, i32 noundef 78, i32 noundef 10, i32 noundef 86, ptr noundef %SPS) #4, !dbg !177"
+  "1": {
+    "instr": "  call void @mayo_memset(ptr %PS, i8 0, i32 34400), !dbg !175",
+    "type": "CallInst",
+    "callee": "mayo_memset"
+  },
+  "2": {
+    "instr": "  call fastcc void @mayo_generic_m_calculate_PS(ptr noundef %P1, ptr noundef %P2, ptr noundef %P3, ptr noundef %s, i32 noundef 78, i32 noundef 78, i32 noundef 8, i32 noundef 10, ptr noundef nonnull %PS) #4, !dbg !176",
+    "type": "CallInst",
+    "callee": "mayo_generic_m_calculate_PS"
+  },
+  "3": {
+    "instr": "  call fastcc void @mayo_generic_m_calculate_SPS(ptr noundef nonnull %PS, ptr noundef %s, i32 noundef 78, i32 noundef 10, i32 noundef 86, ptr noundef %SPS) #4, !dbg !177",
+    "type": "CallInst",
+    "callee": "mayo_generic_m_calculate_SPS"
+  }
 }

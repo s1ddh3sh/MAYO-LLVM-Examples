@@ -1,9 +1,30 @@
 {
-  "1": "  %mdec.addr.0 = phi ptr [ %mdec, %entry ], [ %incdec.ptr5, %for.body ]",
-  "9": "  %incdec.ptr = getelementptr inbounds nuw i8, ptr %mdec.addr.0, i32 1, !dbg !146",
-  "10": "  store i8 %1, ptr %mdec.addr.0, align 1, !dbg !147",
-  "14": "  store i8 %3, ptr %incdec.ptr, align 1, !dbg !150",
-  "15": "  %incdec.ptr5 = getelementptr inbounds nuw i8, ptr %mdec.addr.0, i32 2, !dbg !151",
-  "18": "  %mdec.addr.0.lcssa = phi ptr [ %mdec.addr.0, %for.cond ]",
-  "26": "  store i8 %6, ptr %mdec.addr.0.lcssa, align 1, !dbg !162"
+  "1": {
+    "instr": "  %mdec.addr.0 = phi ptr [ %mdec, %entry ], [ %incdec.ptr5, %for.body ]",
+    "type": "PHINode"
+  },
+  "9": {
+    "instr": "  %incdec.ptr = getelementptr inbounds nuw i8, ptr %mdec.addr.0, i32 1, !dbg !146",
+    "type": "GetElementPtrInst"
+  },
+  "10": {
+    "instr": "  store i8 %1, ptr %mdec.addr.0, align 1, !dbg !147",
+    "type": "StoreInst"
+  },
+  "14": {
+    "instr": "  store i8 %3, ptr %incdec.ptr, align 1, !dbg !150",
+    "type": "StoreInst"
+  },
+  "15": {
+    "instr": "  %incdec.ptr5 = getelementptr inbounds nuw i8, ptr %mdec.addr.0, i32 2, !dbg !151",
+    "type": "GetElementPtrInst"
+  },
+  "18": {
+    "instr": "  %mdec.addr.0.lcssa = phi ptr [ %mdec.addr.0, %for.cond ]",
+    "type": "PHINode"
+  },
+  "26": {
+    "instr": "  store i8 %6, ptr %mdec.addr.0.lcssa, align 1, !dbg !162",
+    "type": "StoreInst"
+  }
 }

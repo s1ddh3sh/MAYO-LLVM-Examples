@@ -1,6 +1,19 @@
 {
-  "3": "  %h.addr.0 = phi ptr [ %h, %entry ], [ %add.ptr2, %for.end ]",
-  "12": "  %add.ptr = getelementptr inbounds nuw i8, ptr %h.addr.0, i32 %mul, !dbg !150",
-  "15": "  call fastcc void @store64(ptr noundef %add.ptr, i64 noundef %1) #4, !dbg !152",
-  "18": "  %add.ptr2 = getelementptr inbounds nuw i8, ptr %h.addr.0, i32 %r, !dbg !158"
+  "3": {
+    "instr": "  %h.addr.0 = phi ptr [ %h, %entry ], [ %add.ptr2, %for.end ]",
+    "type": "PHINode"
+  },
+  "12": {
+    "instr": "  %add.ptr = getelementptr inbounds nuw i8, ptr %h.addr.0, i32 %mul, !dbg !150",
+    "type": "GetElementPtrInst"
+  },
+  "15": {
+    "instr": "  call fastcc void @store64(ptr noundef %add.ptr, i64 noundef %1) #4, !dbg !152",
+    "type": "CallInst",
+    "callee": "store64"
+  },
+  "18": {
+    "instr": "  %add.ptr2 = getelementptr inbounds nuw i8, ptr %h.addr.0, i32 %r, !dbg !158",
+    "type": "GetElementPtrInst"
+  }
 }

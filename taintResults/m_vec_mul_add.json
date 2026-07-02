@@ -1,3 +1,7 @@
 {
-  "0": "  %call = call fastcc i32 @mul_table(i8 noundef zeroext %a) #4, !dbg !138"
+  "0": {
+    "instr": "  %call = call fastcc i32 @mul_table(i8 noundef zeroext %a) #4, !dbg !138",
+    "type": "CallInst",
+    "callee": "mul_table"
+  }
 }

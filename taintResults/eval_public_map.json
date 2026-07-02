@@ -1,6 +1,22 @@
 {
-  "2": "  call void @mayo_memset(ptr %SPS, i8 0, i32 4000), !dbg !174",
-  "3": "  call fastcc void @m_calculate_PS_SPS(ptr noundef %p, ptr noundef %P1, ptr noundef %P2, ptr noundef %P3, ptr noundef %s, ptr noundef nonnull %SPS) #4, !dbg !175",
-  "4": "  call void @mayo_memset(ptr %zero, i8 0, i32 78), !dbg !180",
-  "5": "  call fastcc void @compute_rhs(ptr noundef %p, ptr noundef nonnull %SPS, ptr noundef nonnull %zero, ptr noundef %eval) #4, !dbg !181"
+  "2": {
+    "instr": "  call void @mayo_memset(ptr %SPS, i8 0, i32 4000), !dbg !174",
+    "type": "CallInst",
+    "callee": "mayo_memset"
+  },
+  "3": {
+    "instr": "  call fastcc void @m_calculate_PS_SPS(ptr noundef %p, ptr noundef %P1, ptr noundef %P2, ptr noundef %P3, ptr noundef %s, ptr noundef nonnull %SPS) #4, !dbg !175",
+    "type": "CallInst",
+    "callee": "m_calculate_PS_SPS"
+  },
+  "4": {
+    "instr": "  call void @mayo_memset(ptr %zero, i8 0, i32 78), !dbg !180",
+    "type": "CallInst",
+    "callee": "mayo_memset"
+  },
+  "5": {
+    "instr": "  call fastcc void @compute_rhs(ptr noundef %p, ptr noundef nonnull %SPS, ptr noundef nonnull %zero, ptr noundef %eval) #4, !dbg !181",
+    "type": "CallInst",
+    "callee": "compute_rhs"
+  }
 }

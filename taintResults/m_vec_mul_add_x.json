@@ -1,14 +1,50 @@
 {
-  "4": "  %arrayidx = getelementptr inbounds nuw i64, ptr %in, i32 %i.0, !dbg !146",
-  "5": "  %0 = load i64, ptr %arrayidx, align 8, !dbg !146",
-  "6": "  %xor = shl i64 %0, 1, !dbg !150",
-  "7": "  %shl = and i64 %xor, -1229782938247303442, !dbg !150",
-  "8": "  %and = lshr i64 %0, 3, !dbg !151",
-  "9": "  %shr = and i64 %and, 1229782938247303441, !dbg !151",
-  "10": "  %mul = mul nuw nsw i64 %shr, 3, !dbg !152",
-  "11": "  %xor2 = xor i64 %shl, %mul, !dbg !153",
-  "12": "  %arrayidx3 = getelementptr inbounds nuw i64, ptr %acc, i32 %i.0, !dbg !154",
-  "13": "  %1 = load i64, ptr %arrayidx3, align 8, !dbg !155",
-  "14": "  %xor4 = xor i64 %1, %xor2, !dbg !155",
-  "15": "  store i64 %xor4, ptr %arrayidx3, align 8, !dbg !155"
+  "4": {
+    "instr": "  %arrayidx = getelementptr inbounds nuw i64, ptr %in, i32 %i.0, !dbg !146",
+    "type": "GetElementPtrInst"
+  },
+  "5": {
+    "instr": "  %0 = load i64, ptr %arrayidx, align 8, !dbg !146",
+    "type": "LoadInst"
+  },
+  "6": {
+    "instr": "  %xor = shl i64 %0, 1, !dbg !150",
+    "type": "BinOp"
+  },
+  "7": {
+    "instr": "  %shl = and i64 %xor, -1229782938247303442, !dbg !150",
+    "type": "BinOp"
+  },
+  "8": {
+    "instr": "  %and = lshr i64 %0, 3, !dbg !151",
+    "type": "BinOp"
+  },
+  "9": {
+    "instr": "  %shr = and i64 %and, 1229782938247303441, !dbg !151",
+    "type": "BinOp"
+  },
+  "10": {
+    "instr": "  %mul = mul nuw nsw i64 %shr, 3, !dbg !152",
+    "type": "BinOp"
+  },
+  "11": {
+    "instr": "  %xor2 = xor i64 %shl, %mul, !dbg !153",
+    "type": "BinOp"
+  },
+  "12": {
+    "instr": "  %arrayidx3 = getelementptr inbounds nuw i64, ptr %acc, i32 %i.0, !dbg !154",
+    "type": "GetElementPtrInst"
+  },
+  "13": {
+    "instr": "  %1 = load i64, ptr %arrayidx3, align 8, !dbg !155",
+    "type": "LoadInst"
+  },
+  "14": {
+    "instr": "  %xor4 = xor i64 %1, %xor2, !dbg !155",
+    "type": "BinOp"
+  },
+  "15": {
+    "instr": "  store i64 %xor4, ptr %arrayidx3, align 8, !dbg !155",
+    "type": "StoreInst"
+  }
 }

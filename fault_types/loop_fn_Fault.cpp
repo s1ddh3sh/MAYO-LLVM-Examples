@@ -356,7 +356,8 @@ unsigned inferPointerAllocSize(Argument *arg, unsigned defaultSize) {
 // static void emitAssert(IRBuilder<> &builder, LLVMContext &ctx, Value *cond,
 //                        Function *parentFn) {
 //   Function *trapFn =
-//       Intrinsic::getOrInsertDeclaration(parentFn->getParent(), Intrinsic::trap);
+//       Intrinsic::getOrInsertDeclaration(parentFn->getParent(),
+//       Intrinsic::trap);
 
 //   BasicBlock *failBB = BasicBlock::Create(ctx, "assert.fail", parentFn);
 //   BasicBlock *contBB = BasicBlock::Create(ctx, "assert.cont", parentFn);
@@ -379,8 +380,8 @@ static void emitAssert(IRBuilder<> &builder, LLVMContext &ctx, Value *cond,
   if (!AssertFn) {
     FunctionType *AssertTy =
         FunctionType::get(Type::getVoidTy(ctx), {Type::getInt1Ty(ctx)}, false);
-    AssertFn = Function::Create(AssertTy, GlobalValue::ExternalLinkage,
-                                AssertName, M);
+    AssertFn =
+        Function::Create(AssertTy, GlobalValue::ExternalLinkage, AssertName, M);
     AssertFn->addParamAttr(0, Attribute::NoUndef);
     AssertFn->addParamAttr(0, Attribute::ZExt);
   }
@@ -1128,13 +1129,13 @@ int main(int argc, char **argv) {
     errs() << "Invalid IR after LabeledUnrollPass\n";
     return 1;
   }
-  std::string filename = "../results/" + funcName + ".ll";
+  std::string filename = "../results/" + funcName + "/" + funcName + ".ll";
 
   dump_module(*funcModule, filename);
-  outs() << "Wrote original.ll\n";
+  outs() << "Wrote" << filename << "\n";
 
   // Clone and inject fault
-  filename = "../results/loopOrFuncSkip/" + funcName;
+  filename = "../results/" + funcName + "/loopOrFuncSkip/" + funcName;
 
   if (mode == LOOP_SKIP) {
     auto faultModule = CloneModule(*funcModule);
@@ -1239,7 +1240,8 @@ int main(int argc, char **argv) {
       errs() << "Fault module has invalid IR\n";
     } else {
       dump_module(*faultModule, filename + "_loopSkip.ll");
-      outs() << "Wrote loopSkip.ll\n";
+
+      outs() << "Wrote" << filename << "\n";
     }
 
   } else if (mode == FUNC_SKIP) {
@@ -1302,8 +1304,8 @@ int main(int argc, char **argv) {
     if (verifyModule(*preUnrollClone, &errs())) {
       errs() << "Fault module has invalid IR\n";
     } else {
-      dump_module(*preUnrollClone, filename + "_funcSkip.ll");
-      outs() << "Wrote funcSkip.ll\n";
+      dump_module(*preUnrollClone, filename + "_fnSkip_" + funcToSkip + ".ll");
+      outs() << "Wrote" << filename << "\n";
     }
 
   } else {
@@ -1311,24 +1313,26 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::string bmcCmdCorrect =
-      "../llvmbmc ../results/original.ll --dump-solver-query "
-      "-f main --var-suffix correct ";
-  run_command(bmcCmdCorrect);
-  run_command("cp /tmp/test.smt2 ../correct.smt2");
-  if (mode == LOOP_SKIP) {
-    std::string bmcCmdFaulty =
-        "../llvmbmc ../results/loopOrFuncSkip/loopSkip.ll --dump-solver-query "
-        "-f main --var-suffix faulty ";
-    run_command(bmcCmdFaulty);
-    run_command("cp /tmp/test.smt2 ../loopFault.smt2");
-  } else {
-    std::string bmcCmdFaulty =
-        "../llvmbmc ../results/loopOrFuncSkip/funcSkip.ll --dump-solver-query "
-        "-f main --var-suffix faulty ";
-    run_command(bmcCmdFaulty);
-    run_command("cp /tmp/test.smt2 ../funcSkip.smt2");
-  }
+  // std::string bmcCmdCorrect =
+  //     "../llvmbmc ../results/original.ll --dump-solver-query "
+  //     "-f main --var-suffix correct ";
+  // run_command(bmcCmdCorrect);
+  // run_command("cp /tmp/test.smt2 ../correct.smt2");
+  // if (mode == LOOP_SKIP) {
+  //   std::string bmcCmdFaulty =
+  //       "../llvmbmc ../results/loopOrFuncSkip/loopSkip.ll --dump-solver-query
+  //       "
+  //       "-f main --var-suffix faulty ";
+  //   run_command(bmcCmdFaulty);
+  //   run_command("cp /tmp/test.smt2 ../loopFault.smt2");
+  // } else {
+  //   std::string bmcCmdFaulty =
+  //       "../llvmbmc ../results/loopOrFuncSkip/funcSkip.ll --dump-solver-query
+  //       "
+  //       "-f main --var-suffix faulty ";
+  //   run_command(bmcCmdFaulty);
+  //   run_command("cp /tmp/test.smt2 ../funcSkip.smt2");
+  // }
 
   return 0;
 }

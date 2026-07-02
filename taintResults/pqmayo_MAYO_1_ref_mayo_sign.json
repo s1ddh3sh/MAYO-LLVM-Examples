@@ -1,5 +1,17 @@
 {
-  "2": "  %call = call ptr @memmove(ptr noundef nonnull %add.ptr, ptr noundef %m, i32 noundef %mlen) #4, !dbg !174",
-  "4": "  %call2 = call i32 @pqmayo_MAYO_1_ref_mayo_sign_signature(ptr noundef %p, ptr noundef %sm, ptr noundef nonnull %siglen, ptr noundef nonnull %add.ptr1, i32 noundef %mlen, ptr noundef %csk) #5, !dbg !177",
-  "10": "  %call4 = call ptr @memset(ptr noundef %sm, i32 noundef 0, i32 noundef %add) #4, !dbg !183"
+  "2": {
+    "instr": "  %call = call ptr @memmove(ptr noundef nonnull %add.ptr, ptr noundef %m, i32 noundef %mlen) #4, !dbg !174",
+    "type": "CallInst",
+    "callee": "memmove"
+  },
+  "4": {
+    "instr": "  %call2 = call i32 @pqmayo_MAYO_1_ref_mayo_sign_signature(ptr noundef %p, ptr noundef %sm, ptr noundef nonnull %siglen, ptr noundef nonnull %add.ptr1, i32 noundef %mlen, ptr noundef %csk) #5, !dbg !177",
+    "type": "CallInst",
+    "callee": "pqmayo_MAYO_1_ref_mayo_sign_signature"
+  },
+  "10": {
+    "instr": "  %call4 = call ptr @memset(ptr noundef %sm, i32 noundef 0, i32 noundef %add) #4, !dbg !183",
+    "type": "CallInst",
+    "callee": "memset"
+  }
 }

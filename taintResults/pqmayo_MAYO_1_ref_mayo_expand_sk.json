@@ -1,9 +1,35 @@
 {
-  "1": "  %add.ptr1 = getelementptr inbounds nuw i8, ptr %sk, i32 148200, !dbg !173",
-  "2": "  call void @shake256(ptr noundef nonnull %S, i32 noundef 328, ptr noundef %csk, i32 noundef 24) #4, !dbg !183",
-  "4": "  call fastcc void @decode(ptr noundef nonnull %add.ptr4, ptr noundef nonnull %add.ptr1, i32 noundef 624) #4, !dbg !185",
-  "5": "  call fastcc void @expand_P1_P2(ptr noundef %p, ptr noundef %sk, ptr noundef nonnull %S) #4, !dbg !186",
-  "6": "  %add.ptr5 = getelementptr inbounds nuw i8, ptr %sk, i32 123240, !dbg !187",
-  "7": "  call fastcc void @P1P1t_times_O(ptr noundef %p, ptr noundef %sk, ptr noundef nonnull %add.ptr1, ptr noundef nonnull %add.ptr5) #4, !dbg !191",
-  "8": "  call void @mayo_secure_clear(ptr noundef nonnull %S, i32 noundef 328) #4, !dbg !192"
+  "1": {
+    "instr": "  %add.ptr1 = getelementptr inbounds nuw i8, ptr %sk, i32 148200, !dbg !173",
+    "type": "GetElementPtrInst"
+  },
+  "2": {
+    "instr": "  call void @shake256(ptr noundef nonnull %S, i32 noundef 328, ptr noundef %csk, i32 noundef 24) #4, !dbg !183",
+    "type": "CallInst",
+    "callee": "shake256"
+  },
+  "4": {
+    "instr": "  call fastcc void @decode(ptr noundef nonnull %add.ptr4, ptr noundef nonnull %add.ptr1, i32 noundef 624) #4, !dbg !185",
+    "type": "CallInst",
+    "callee": "decode"
+  },
+  "5": {
+    "instr": "  call fastcc void @expand_P1_P2(ptr noundef %p, ptr noundef %sk, ptr noundef nonnull %S) #4, !dbg !186",
+    "type": "CallInst",
+    "callee": "expand_P1_P2"
+  },
+  "6": {
+    "instr": "  %add.ptr5 = getelementptr inbounds nuw i8, ptr %sk, i32 123240, !dbg !187",
+    "type": "GetElementPtrInst"
+  },
+  "7": {
+    "instr": "  call fastcc void @P1P1t_times_O(ptr noundef %p, ptr noundef %sk, ptr noundef nonnull %add.ptr1, ptr noundef nonnull %add.ptr5) #4, !dbg !191",
+    "type": "CallInst",
+    "callee": "P1P1t_times_O"
+  },
+  "8": {
+    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %S, i32 noundef 328) #4, !dbg !192",
+    "type": "CallInst",
+    "callee": "mayo_secure_clear"
+  }
 }

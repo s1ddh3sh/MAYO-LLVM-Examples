@@ -1,6 +1,20 @@
 {
-  "17": "  %add.ptr = getelementptr inbounds i8, ptr %in, i32 %add.ptr.idx, !dbg !191",
-  "20": "  call fastcc void @m_vec_copy.17(i32 noundef 5, ptr noundef %add.ptr, ptr noundef %add.ptr6) #4, !dbg !193",
-  "26": "  %add.ptr11 = getelementptr inbounds i8, ptr %in, i32 %add.ptr11.idx, !dbg !199",
-  "29": "  call fastcc void @m_vec_add.18(i32 noundef 5, ptr noundef %add.ptr11, ptr noundef %add.ptr13) #4, !dbg !201"
+  "17": {
+    "instr": "  %add.ptr = getelementptr inbounds i8, ptr %in, i32 %add.ptr.idx, !dbg !191",
+    "type": "GetElementPtrInst"
+  },
+  "20": {
+    "instr": "  call fastcc void @m_vec_copy.17(i32 noundef 5, ptr noundef %add.ptr, ptr noundef %add.ptr6) #4, !dbg !193",
+    "type": "CallInst",
+    "callee": "m_vec_copy.17"
+  },
+  "26": {
+    "instr": "  %add.ptr11 = getelementptr inbounds i8, ptr %in, i32 %add.ptr11.idx, !dbg !199",
+    "type": "GetElementPtrInst"
+  },
+  "29": {
+    "instr": "  call fastcc void @m_vec_add.18(i32 noundef 5, ptr noundef %add.ptr11, ptr noundef %add.ptr13) #4, !dbg !201",
+    "type": "CallInst",
+    "callee": "m_vec_add.18"
+  }
 }

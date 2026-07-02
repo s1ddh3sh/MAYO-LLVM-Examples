@@ -1,3 +1,7 @@
 {
-  "0": "  call fastcc void @mul_add_m_upper_triangular_mat_x_mat(i32 noundef 5, ptr noundef %P1, ptr noundef %O, ptr noundef %acc, i32 noundef 78, i32 noundef 78, i32 noundef 8, i32 noundef 1) #4, !dbg !169"
+  "0": {
+    "instr": "  call fastcc void @mul_add_m_upper_triangular_mat_x_mat(i32 noundef 5, ptr noundef %P1, ptr noundef %O, ptr noundef %acc, i32 noundef 78, i32 noundef 78, i32 noundef 8, i32 noundef 1) #4, !dbg !169",
+    "type": "CallInst",
+    "callee": "mul_add_m_upper_triangular_mat_x_mat"
+  }
 }

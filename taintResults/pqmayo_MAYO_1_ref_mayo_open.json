@@ -1,6 +1,20 @@
 {
-  "2": "  %add.ptr = getelementptr inbounds nuw i8, ptr %sm, i32 454, !dbg !174",
-  "4": "  %call = call i32 @pqmayo_MAYO_1_ref_mayo_verify(ptr noundef %p, ptr noundef nonnull %add.ptr, i32 noundef %sub, ptr noundef %sm, ptr noundef %pk) #4, !dbg !176",
-  "9": "  %add.ptr4 = getelementptr inbounds nuw i8, ptr %sm, i32 454, !dbg !183",
-  "10": "  %call5 = call ptr @memmove(ptr noundef %m, ptr noundef nonnull %add.ptr4, i32 noundef %sub3) #5, !dbg !184"
+  "2": {
+    "instr": "  %add.ptr = getelementptr inbounds nuw i8, ptr %sm, i32 454, !dbg !174",
+    "type": "GetElementPtrInst"
+  },
+  "4": {
+    "instr": "  %call = call i32 @pqmayo_MAYO_1_ref_mayo_verify(ptr noundef %p, ptr noundef nonnull %add.ptr, i32 noundef %sub, ptr noundef %sm, ptr noundef %pk) #4, !dbg !176",
+    "type": "CallInst",
+    "callee": "pqmayo_MAYO_1_ref_mayo_verify"
+  },
+  "9": {
+    "instr": "  %add.ptr4 = getelementptr inbounds nuw i8, ptr %sm, i32 454, !dbg !183",
+    "type": "GetElementPtrInst"
+  },
+  "10": {
+    "instr": "  %call5 = call ptr @memmove(ptr noundef %m, ptr noundef nonnull %add.ptr4, i32 noundef %sub3) #5, !dbg !184",
+    "type": "CallInst",
+    "callee": "memmove"
+  }
 }

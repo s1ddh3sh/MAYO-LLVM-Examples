@@ -1,4 +1,11 @@
 {
-  "7": "  %add.ptr4 = getelementptr inbounds nuw i8, ptr %in, i32 %mul3, !dbg !152",
-  "8": "  %call = call ptr @memmove(ptr noundef %add.ptr, ptr noundef nonnull %add.ptr4, i32 noundef 39) #4, !dbg !153"
+  "7": {
+    "instr": "  %add.ptr4 = getelementptr inbounds nuw i8, ptr %in, i32 %mul3, !dbg !152",
+    "type": "GetElementPtrInst"
+  },
+  "8": {
+    "instr": "  %call = call ptr @memmove(ptr noundef %add.ptr, ptr noundef nonnull %add.ptr4, i32 noundef 39) #4, !dbg !153",
+    "type": "CallInst",
+    "callee": "memmove"
+  }
 }
