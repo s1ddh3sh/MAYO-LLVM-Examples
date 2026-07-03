@@ -26,10 +26,5 @@
     "instr": "  call fastcc void @P1P1t_times_O(ptr noundef %p, ptr noundef %sk, ptr noundef nonnull %add.ptr1, ptr noundef nonnull %add.ptr5) #4, !dbg !191",
     "type": "CallInst",
     "callee": "P1P1t_times_O"
-  },
-  "8": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %S, i32 noundef 328) #4, !dbg !192",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
   }
 }

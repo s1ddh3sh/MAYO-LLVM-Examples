@@ -110,25 +110,5 @@
   "151": {
     "instr": "  store i8 %12, ptr %arrayidx137, align 1, !dbg !342",
     "type": "StoreInst"
-  },
-  "156": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %temp, i32 noundef 96) #4, !dbg !351",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
-  "157": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %_pivot_row, i32 noundef 48) #4, !dbg !352",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
-  "158": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %_pivot_row2, i32 noundef 48) #4, !dbg !353",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
-  "159": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %packed_A, i32 noundef 3744) #4, !dbg !354",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
   }
 }

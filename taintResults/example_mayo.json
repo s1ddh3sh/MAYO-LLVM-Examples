@@ -57,15 +57,5 @@
     "instr": "  %call32 = call i32 @pqmayo_MAYO_1_ref_mayo_verify(ptr noundef null, ptr noundef nonnull %msg, i32 noundef %4, ptr noundef %call3, ptr noundef %call) #5, !dbg !207",
     "type": "CallInst",
     "callee": "pqmayo_MAYO_1_ref_mayo_verify"
-  },
-  "33": {
-    "instr": "  call void @free(ptr noundef %call) #6, !dbg !212",
-    "type": "CallInst",
-    "callee": "free"
-  },
-  "35": {
-    "instr": "  call void @free(ptr noundef %call3) #6, !dbg !214",
-    "type": "CallInst",
-    "callee": "free"
   }
 }

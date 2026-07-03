@@ -41,20 +41,5 @@
     "instr": "  call fastcc void @pack_m_vecs(ptr noundef nonnull %P3_upper, ptr noundef nonnull %add.ptr15, i32 noundef 36, i32 noundef 78) #4, !dbg !217",
     "type": "CallInst",
     "callee": "pack_m_vecs"
-  },
-  "17": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %O, i32 noundef 624) #4, !dbg !220",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
-  "18": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %add.ptr, i32 noundef 24960) #4, !dbg !221",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
-  "19": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %P3, i32 noundef 2560) #4, !dbg !222",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
   }
 }

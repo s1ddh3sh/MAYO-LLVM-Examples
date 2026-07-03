@@ -55,14 +55,65 @@
 using namespace llvm;
 
 enum FaultMode { LOOP_SKIP = 0, FUNC_SKIP = 1 };
+static Instruction *getInstByIndex(Function &F, unsigned targetInst) {
+  unsigned idx = 0;
+  for (BasicBlock &BB : F) {
+    for (Instruction &I : BB) {
+      if (idx == targetInst)
+        return &I;
+      ++idx;
+    }
+  }
+  return nullptr;
+}
 
+struct InstLocator {
+  bool hasDbg = false;
+  unsigned dbgLine = 0;
+  unsigned dbgCol = 0;
+  unsigned fallbackIndex = 0;
+};
+
+static InstLocator captureInstLocator(Instruction *I, unsigned idxInFunction) {
+  InstLocator loc;
+  loc.fallbackIndex = idxInFunction;
+  if (DebugLoc DL = I->getDebugLoc()) {
+    loc.hasDbg = true;
+    loc.dbgLine = DL.getLine();
+    loc.dbgCol = DL.getCol();
+  }
+  return loc;
+}
+
+static bool locMatches(Instruction *I, const InstLocator &loc) {
+  if (!loc.hasDbg)
+    return false;
+  DebugLoc DL = I->getDebugLoc();
+  return DL && DL.getLine() == loc.dbgLine && DL.getCol() == loc.dbgCol;
+}
+
+static Instruction *findInstByLocator(Function &F, const InstLocator &loc) {
+  if (loc.hasDbg) {
+    for (BasicBlock &BB : F)
+      for (Instruction &I : BB)
+        if (locMatches(&I, loc))
+          return &I;
+    return nullptr;
+  }
+  return getInstByIndex(F, loc.fallbackIndex);
+}
 class FuncSkip : public PassInfoMixin<FuncSkip> {
 private:
-  std::string funcToSkip;
+  InstLocator loc;
+  std::string targetFuncName;
 
 public:
-  FuncSkip(std::string func) : funcToSkip(std::move(func)) {}
+  FuncSkip(InstLocator loc, std::string targetFuncName)
+      : loc(loc), targetFuncName(std::move(targetFuncName)) {}
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
+     if (F.getName() != targetFuncName)
+      return PreservedAnalyses::all();
+
     auto &LI = FAM.getResult<LoopAnalysis>(F);
     auto &SE = FAM.getResult<ScalarEvolutionAnalysis>(F);
 
@@ -75,14 +126,13 @@ public:
       }
 
       errs() << "Loop trip count: " << tripCount << "\n";
-      addLabelNUnrollWithFuncSkip(F, L, LI, SE, tripCount, funcToSkip);
+      addLabelNUnrollWithFuncSkip(F, L, LI, SE, tripCount);
     }
     return PreservedAnalyses::none();
   }
 
   void addLabelNUnrollWithFuncSkip(Function &F, Loop *L, LoopInfo &LI,
-                                   ScalarEvolution &SE, unsigned tripCount,
-                                   const std::string &funcToSkip) {
+                                   ScalarEvolution &SE, unsigned tripCount) {
     BasicBlock *header = L->getHeader();
     BasicBlock *latch = L->getLoopLatch();
     BasicBlock *preheader = L->getLoopPreheader();
@@ -159,14 +209,16 @@ public:
             if (!CI)
               continue;
 
-            Function *callee = CI->getCalledFunction();
-            if (callee && callee->getName() == funcToSkip) {
-              outs() << "skipping fn call " << callee->getName() << "\n";
-              // if (!CI->getType()->isVoidTy()) {
-              Value *v = CI->getArgOperand(0);
-              // Value *v = Constant::getNullValue(CI->getType());
-              CI->replaceAllUsesWith(v);
-              // }
+            if (locMatches(CI, loc)) {
+              outs() << "skipping fn call "
+                     << (CI->getCalledFunction()
+                             ? CI->getCalledFunction()->getName()
+                             : "<indirect>")
+                     << " at dbg " << loc.dbgLine << ":" << loc.dbgCol << "\n";
+              if (!CI->getType()->isVoidTy() && CI->arg_size() > 0) {
+                Value *v = CI->getArgOperand(0);
+                CI->replaceAllUsesWith(v);
+              }
               CI->eraseFromParent();
             }
           }
@@ -683,6 +735,38 @@ std::unique_ptr<Module> extractFunction(Module &M, Function *F) {
 
   return newMod;
 }
+class DirectFuncSkip : public PassInfoMixin<DirectFuncSkip> {
+  InstLocator loc;
+  std::string targetFuncName;
+
+public:
+  DirectFuncSkip(InstLocator loc, std::string targetFuncName)
+      : loc(loc), targetFuncName(std::move(targetFuncName)) {}
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &) {
+    if (F.getName() != targetFuncName)
+      return PreservedAnalyses::all();
+    Instruction *I = findInstByLocator(F, loc);
+    if (!I) {
+      errs() << "No instruction found for locator (direct skip)\n";
+      return PreservedAnalyses::all();
+    }
+    auto *CI = dyn_cast<CallInst>(I);
+    if (!CI) {
+      errs() << "Instruction at locator is not a CallInst\n";
+      return PreservedAnalyses::all();
+    }
+
+    outs() << "Directly skipping call to "
+           << (CI->getCalledFunction() ? CI->getCalledFunction()->getName()
+                                       : "<indirect>")
+           << "\n";
+    if (!CI->getType()->isVoidTy() && CI->arg_size() > 0)
+      CI->replaceAllUsesWith(CI->getArgOperand(0));
+    CI->eraseFromParent();
+
+    return PreservedAnalyses::none();
+  }
+};
 
 class LabeledUnrollPass : public PassInfoMixin<LabeledUnrollPass> {
 public:
@@ -963,48 +1047,42 @@ void cleanup(Module &M) {
 }
 int main(int argc, char **argv) {
   if (argc < 3) {
-    errs() << "Usage: loopSkip <input.ll> <mode> [funcName] [funcToSkip]\n";
+    errs() << "Usage: ./loop_fn_Fault <input.ll> <mode> [funcName] [funcToSkip "
+              "| line]\n";
     errs() << "0 => loopSkip\n";
-    errs() << "1 => funcSkip\n";
+    errs() << "1 => funcSkip (funcToSkip arg is a line number into the taint "
+              "JSON)\n";
     return 1;
   }
 
   std::string inputFile = argv[1];
   int mode = std::stoi(argv[2]);
   std::string funcName = "main";
-  std::string funcToSkip = "";
+  std::string funcToSkipArg = "";
   if (argc >= 5) {
     funcName = argv[3];
-    funcToSkip = argv[4];
+    funcToSkipArg = argv[4];
   }
   LLVMContext ctx;
   SMDiagnostic err;
   auto module = parseIRFile(inputFile, err, ctx);
   if (!module) {
     err.print("Input File not found", errs());
-    errs() << "Usage: loopSkip <input.ll> <mode> [funcName] [funcToSkip]\n";
-    errs() << "0 => loopSkip\n";
-    errs() << "1 => funcSkip\n";
     return 1;
   }
 
   Function *target = module->getFunction(funcName);
   if (!target) {
     std::cout << "Target Function not found: " << funcName << std::endl;
-    errs() << "Usage: loopSkip <input.ll> <mode> [funcName] [funcToSkip]\n";
-    errs() << "0 => loopSkip\n";
-    errs() << "1 => funcSkip\n";
     return 1;
   }
-
-  Function *skipTarget = module->getFunction(funcToSkip);
-  if (!skipTarget && mode == FUNC_SKIP) {
-    std::cout << "Function to Skip not found: " << funcToSkip << std::endl;
-    errs()
-        << "Usage: ./loop_fn_Fault <input.ll> <mode> [funcName] [funcToSkip]\n";
-    errs() << "0 => loopSkip\n";
-    errs() << "1 => funcSkip\n";
-    return 1;
+  int skipLine = -1;
+  if (mode == FUNC_SKIP) {
+    if (funcToSkipArg.empty()) {
+      errs() << "FUNC_SKIP mode requires a line number as the 4th arg\n";
+      return 1;
+    }
+    skipLine = std::stoi(funcToSkipArg);
   }
 
   auto funcModule = extractFunction(*module, target);
@@ -1020,19 +1098,80 @@ int main(int argc, char **argv) {
     Function *extractedFunc = funcModule->getFunction(funcName);
     if (extractedFunc) {
       errs() << "Creating driver function for " << funcName << "...\n";
-
       std::string jsonPath = "../../function_inputs/" + funcName + ".json";
 
-      std::vector<JsonObject> testcases = readJsonLines(jsonPath);
-      if (testcases.empty()) {
-        errs() << "No testcases found in " << jsonPath << "\n";
-        return 1;
+      JsonObject testcase;
+      bool haveTestcase = false;
+      try {
+        std::vector<JsonObject> testcases = readJsonLines(jsonPath);
+        if (!testcases.empty()) {
+          testcase = testcases.front();
+          haveTestcase = true;
+        }
+      } catch (const std::exception &e) {
+        errs() << "Warning: could not load testcases from " << jsonPath << " ("
+               << e.what() << "); defaulting all arguments to zero.\n";
       }
-      const JsonObject &testcase = testcases.front();
+      if (!haveTestcase)
+        errs() << "  Using zero-initialized arguments for " << funcName << "\n";
 
       createDynamicDriverFunction(*module, *funcModule, extractedFunc,
                                   testcase);
     }
+  }
+
+  // --- Resolve the target call site & whether it's inside a loop ---
+
+  InstLocator skipLoc;
+  bool callInsideLoop = false;
+  std::string skippedCalleeName;
+
+  if (mode == FUNC_SKIP) {
+    Function *preOptF = funcModule->getFunction(funcName);
+    if (!preOptF) {
+      errs() << "Function not found in extracted module: " << funcName << "\n";
+      return 1;
+    }
+    Instruction *origInst = getInstByIndex(*preOptF, skipLine);
+    if (!origInst) {
+      errs() << "No instruction found at line " << skipLine
+             << " in extracted (pre-optimization) function\n";
+      return 1;
+    }
+    auto *origCall = dyn_cast<CallInst>(origInst);
+    if (!origCall) {
+      errs() << "Instruction at line " << skipLine << " is not a CallInst ("
+             << origInst->getOpcodeName()
+             << "); funcSkip requires a CallInst\n";
+      return 1;
+    }
+    skippedCalleeName = origCall->getCalledFunction()
+                            ? origCall->getCalledFunction()->getName().str()
+                            : "<indirect>";
+    skipLoc = captureInstLocator(origInst, skipLine);
+    if (!skipLoc.hasDbg) {
+      errs() << "Warning: call at line " << skipLine
+             << " has no debug location; re-lookup after unrolling may be "
+                "unreliable.\n";
+    }
+
+    LoopAnalysisManager LAM;
+    FunctionAnalysisManager FAM;
+    CGSCCAnalysisManager CGAM;
+    ModuleAnalysisManager MAM;
+    PassBuilder PB;
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+    auto &LI = FAM.getResult<LoopAnalysis>(*preOptF);
+    callInsideLoop = (LI.getLoopFor(origCall->getParent()) != nullptr);
+
+    errs() << "Call to " << skippedCalleeName << " at line " << skipLine
+           << " is " << (callInsideLoop ? "inside" : "NOT inside")
+           << " a loop.\n";
   }
 
   auto makePB = [&](Module &M, auto buildPipeline) {
@@ -1252,24 +1391,32 @@ int main(int argc, char **argv) {
         F.addFnAttr(Attribute::InlineHint);
     }
 
-    makePB(*preUnrollClone, [&funcToSkip](ModulePassManager &MPM) {
-      {
+    makePB(*preUnrollClone, [&](ModulePassManager &MPM) {
+      if (callInsideLoop) {
         FunctionPassManager FPM;
         FPM.addPass(LoopSimplifyPass());
         FPM.addPass(LCSSAPass());
         FPM.addPass(createFunctionToLoopPassAdaptor(LoopRotatePass()));
         FPM.addPass(createFunctionToLoopPassAdaptor(IndVarSimplifyPass()));
-        FPM.addPass(FuncSkip(funcToSkip));
+        FPM.addPass(FuncSkip(skipLoc, funcName));
         FPM.addPass(SCCPPass());
         FPM.addPass(PromotePass());
         MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
-      }
 
-      {
+        InlineParams IP;
+        IP.DefaultThreshold = 10000;
+        MPM.addPass(ModuleInlinerPass(IP));
+      } else {
+        FunctionPassManager FPM;
+        FPM.addPass(DirectFuncSkip(skipLoc,funcName));
+        FPM.addPass(PromotePass());
+        MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+
         InlineParams IP;
         IP.DefaultThreshold = 10000;
         MPM.addPass(ModuleInlinerPass(IP));
       }
+
       MPM.addPass(GlobalOptPass());
     });
     replaceMemoryIntrinsics(*preUnrollClone, *module);
@@ -1304,8 +1451,10 @@ int main(int argc, char **argv) {
     if (verifyModule(*preUnrollClone, &errs())) {
       errs() << "Fault module has invalid IR\n";
     } else {
-      dump_module(*preUnrollClone, filename + "_fnSkip_" + funcToSkip + ".ll");
-      outs() << "Wrote" << filename << "\n";
+      std::string outFile = filename + "_fnSkip_" + skippedCalleeName +
+                            "_line" + std::to_string(skipLine) + ".ll";
+      dump_module(*preUnrollClone, outFile);
+      outs() << "Wrote " << outFile << "\n";
     }
 
   } else {

@@ -1,0 +1,11 @@
+Run faults for each fn:
+./run_fault.sh add_f compute_A compute_M_and_VPV compute_P3 compute_rhs 
+lincomb m_vec_add m_vec_mul_add mat_add mat_mul mul_add_m_upper_triangular_mat_x_mat_trans 
+mul_add_m_upper_triangular_mat_x_mat mul_add_mat_trans_x_m_mat mul_add_mat_x_m_mat mul_f 
+P1_times_O P1_times_Vt P1P1t_times_O pqmayo_MAYO_1_ref_mayo_expand_sk pqmayo_MAYO_1_ref_mayo_keypair_compact 
+pqmayo_MAYO_1_ref_mayo_sign_signature sub_f
+
+Error :
+P1_times_O P1_times_Vt P1P1t_times_O 
+pqmayo_MAYO_1_ref_mayo_expand_sk pqmayo_MAYO_1_ref_mayo_keypair_compact
+pqmayo_MAYO_1_ref_mayo_sign_signature

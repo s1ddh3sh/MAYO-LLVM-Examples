@@ -3,7 +3,8 @@
 # run_faults.sh
 #
 # Usage:
-#   ./run_faults.sh mat_add.json sub_f.json ...
+#   ./run_faults.sh add_f mat_add ...
+#   (Automatically assumes files are in ../taintResults/ and end in .json if not fully specified)
 #
 # For each entry in each JSON file:
 #   - type == "CallInst"  -> ./loop_fn_Fault <ir_file> 1 <basename> <callee>
@@ -25,16 +26,31 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 IR_FILE="../../mayo_IR/mayo1.ll"
+DEFAULT_DIR="../taintResults"
 
 # Resolve all json file paths to absolute *before* we cd into build,
 # since relative paths on the command line are relative to the caller's cwd.
 declare -a JSON_FILES=()
-for f in "$@"; do
-  if [ ! -f "$f" ]; then
-    echo "Warning: file not found, skipping: $f" >&2
+for input in "$@"; do
+  target_file="$input"
+  
+  # If the input isn't an existing file, try resolving it via the default path
+  if [ ! -f "$target_file" ]; then
+    # Append .json extension if it's missing
+    if [[ "$target_file" != *.json ]]; then
+      target_file="${target_file}.json"
+    fi
+    # Prefix with the default directory
+    target_file="${DEFAULT_DIR}/${target_file}"
+  fi
+
+  # Final check to ensure the resolved file actually exists
+  if [ ! -f "$target_file" ]; then
+    echo "Warning: file not found, skipping: $input (resolved to $target_file)" >&2
     continue
   fi
-  JSON_FILES+=("$(realpath "$f")")
+
+  JSON_FILES+=("$(realpath "$target_file")")
 done
 
 if [ ${#JSON_FILES[@]} -eq 0 ]; then
@@ -42,7 +58,7 @@ if [ ${#JSON_FILES[@]} -eq 0 ]; then
   exit 1
 fi
 
-cd build || { echo "Error: could not cd into build" >&2; exit 1; }
+mkdir -p build && cd build
 make -j$(nproc)
 for jsonfile in "${JSON_FILES[@]}"; do
   filename="$(basename "$jsonfile" .json)"
@@ -62,11 +78,11 @@ for jsonfile in "${JSON_FILES[@]}"; do
           echo "  [skip] line $line_no: CallInst with no resolvable callee (indirect call)" >&2
           continue
         fi
-        echo "  [run] ./loop_fn_Fault $IR_FILE 1 $filename $callee"
-        ./loop_fn_Fault "$IR_FILE" 1 "$filename" "$callee"
+        echo "  [run] ./loop_fn_Fault $IR_FILE 1 $filename $line_no"
+        ./loop_fn_Fault "$IR_FILE" 1 "$filename" "$line_no"
         ;;
 
-      BinOp|LoadInst|StoreInst)
+      BinOp)
         echo "  [run] ./binOp_load_store_Fault $IR_FILE $filename $line_no"
         ./binOp_load_store_Fault "$IR_FILE" "$filename" "$line_no"
         ;;

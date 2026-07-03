@@ -176,53 +176,8 @@
     "type": "CallInst",
     "callee": "memcpy"
   },
-  "89": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %V, i32 noundef 430) #4, !dbg !343",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
-  "90": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %Vdec, i32 noundef 780) #4, !dbg !344",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
-  "91": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %A, i32 noundef 6480) #4, !dbg !345",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
-  "92": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %r, i32 noundef 81) #4, !dbg !346",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
   "93": {
     "instr": "  %add.ptr109 = getelementptr inbounds nuw i8, ptr %sk, i32 148200, !dbg !347",
     "type": "GetElementPtrInst"
-  },
-  "94": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %add.ptr109, i32 noundef 624) #4, !dbg !348",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
-  "95": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %sk, i32 noundef 148824) #4, !dbg !349",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
-  "96": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %Ox, i32 noundef 78) #4, !dbg !350",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
-  "97": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %tmp, i32 noundef 81) #4, !dbg !351",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
-  },
-  "98": {
-    "instr": "  call void @mayo_secure_clear(ptr noundef nonnull %Mtmp, i32 noundef 3200) #4, !dbg !352",
-    "type": "CallInst",
-    "callee": "mayo_secure_clear"
   }
 }

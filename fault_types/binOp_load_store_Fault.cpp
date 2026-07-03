@@ -953,16 +953,27 @@ int main(int argc, char **argv) {
     Function *extractedFunc = funcModule->getFunction(funcName);
     if (extractedFunc) {
       errs() << "Creating driver function for " << funcName << "...\n";
-
       std::string jsonPath = "../../function_inputs/" + funcName + ".json";
-
-      std::vector<JsonObject> testcases = readJsonLines(jsonPath);
-      if (testcases.empty()) {
-        errs() << "No testcases found in " << jsonPath << "\n";
-        return 1;
+      JsonObject testcase;
+      bool haveTestcase = false;
+      
+      try {
+        std::vector<JsonObject> testcases = readJsonLines(jsonPath);
+        if (!testcases.empty()) {
+          testcase = testcases.front();
+          haveTestcase = true;
+        } else {
+          errs() << "No testcases found in " << jsonPath
+                 << "; defaulting all arguments to zero.\n";
+        }
+      } catch (const std::exception &e) {
+        errs() << "Warning: could not load testcases from " << jsonPath << " ("
+               << e.what() << "); defaulting all arguments to zero.\n";
       }
-      const JsonObject &testcase = testcases.front();
 
+      if (!haveTestcase) {
+        errs() << "  Using zero-initialized arguments for " << funcName << "\n";
+      }
       createDynamicDriverFunction(*module, *funcModule, extractedFunc,
                                   testcase);
     }
