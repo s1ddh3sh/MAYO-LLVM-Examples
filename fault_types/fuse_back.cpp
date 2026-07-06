@@ -22,7 +22,6 @@
 
 using namespace llvm;
 
-
 static GlobalValue *
 resolveOrImportGlobal(GlobalValue *GV, Module &DestM,
                       DenseMap<GlobalValue *, GlobalValue *> &Imported);
@@ -102,8 +101,6 @@ resolveOrImportGlobal(GlobalValue *GV, Module &DestM,
   return GV;
 }
 
-
-
 static void dumpModule(Module &M, const std::string &filename) {
   SmallString<256> path(filename);
   sys::path::remove_filename(path);
@@ -153,7 +150,6 @@ int main(int argc, char **argv) {
     err.print(argv[0], errs());
     return 1;
   }
-
 
   Function *SrcF = fnModule->getFunction(funcName);
   if (!SrcF || SrcF->isDeclaration()) {
@@ -213,12 +209,25 @@ int main(int argc, char **argv) {
            << "(continuing anyway -- inspect the output manually)\n";
   }
 
-  std::string stem = sys::path::stem(baseFile).str();
-  std::string parent = sys::path::parent_path(fnFile).str();
-  std::string outFile =
-      (parent.empty() ? "" : parent + "/") + stem + "_faulty.ll";
+  SmallString<256> outDir(sys::path::parent_path(fnFile));
 
-  dumpModule(*baseModule, outFile);
+  sys::path::append(outDir, "full_mayo");
+
+  std::error_code EC = sys::fs::create_directories(outDir);
+  if (EC) {
+    errs() << "Failed to create output directory: " << EC.message() << "\n";
+    return 1;
+  }
+
+  std::string fnStem = sys::path::stem(fnFile).str();
+
+  // Construct output filename: mayo_<fnFileStem>.ll
+  std::string outName = "mayo_" + fnStem + ".ll";
+
+  // Construct full output path
+  SmallString<256> outFile(outDir);
+  sys::path::append(outFile, outName);
+  dumpModule(*baseModule, outFile.str().str());
   outs() << "Wrote " << outFile << "\n";
 
   return 0;
