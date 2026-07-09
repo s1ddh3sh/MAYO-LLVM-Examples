@@ -111,7 +111,7 @@ public:
   FuncSkip(InstLocator loc, std::string targetFuncName)
       : loc(loc), targetFuncName(std::move(targetFuncName)) {}
   PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM) {
-     if (F.getName() != targetFuncName)
+    if (F.getName() != targetFuncName)
       return PreservedAnalyses::all();
 
     auto &LI = FAM.getResult<LoopAnalysis>(F);
@@ -449,16 +449,17 @@ static void zeroFillThenStoreU64(IRBuilder<> &builder, LLVMContext &ctx,
   if (!haveVal || allocSize == 0)
     return;
 
-  if (allocSize >= 8) {
-    Value *i64Ptr = builder.CreateBitCast(
-        basePtr, PointerType::getUnqual(Type::getInt64Ty(ctx)));
-    builder.CreateStore(ConstantInt::get(Type::getInt64Ty(ctx), val), i64Ptr);
-  } else {
-    // Narrow buffer: store only as many low bytes as fit.
-    Type *narrowTy = Type::getIntNTy(ctx, (unsigned)allocSize * 8);
-    Value *narrowPtr =
-        builder.CreateBitCast(basePtr, PointerType::getUnqual(narrowTy));
-    builder.CreateStore(ConstantInt::get(narrowTy, val), narrowPtr);
+  unsigned numBytes = (unsigned)std::min<uint64_t>(allocSize, 8);
+  Type *i8Ty = Type::getInt8Ty(ctx);
+
+  for (unsigned i = 0; i < numBytes; i++) {
+    uint8_t byteVal = (uint8_t)((val >> (i * 8)) & 0xFF);
+    if (byteVal == 0)
+      continue; // buffer is already zeroed by the memset above
+
+    Value *bytePtr = builder.CreateInBoundsGEP(
+        i8Ty, basePtr, builder.getInt32(i), "byte" + std::to_string(i));
+    builder.CreateStore(builder.getInt8(byteVal), bytePtr);
   }
 }
 
@@ -1408,7 +1409,7 @@ int main(int argc, char **argv) {
         MPM.addPass(ModuleInlinerPass(IP));
       } else {
         FunctionPassManager FPM;
-        FPM.addPass(DirectFuncSkip(skipLoc,funcName));
+        FPM.addPass(DirectFuncSkip(skipLoc, funcName));
         FPM.addPass(PromotePass());
         MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
 
