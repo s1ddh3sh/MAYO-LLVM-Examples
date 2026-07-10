@@ -661,11 +661,11 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
 
         Value *cmp = nullptr;
         if (outAllocSize >= 8) {
-          Value *i64Ptr = builder.CreateBitCast(
-              outPtr, PointerType::getUnqual(Type::getInt64Ty(ctx)));
-          Value *actual = builder.CreateLoad(Type::getInt64Ty(ctx), i64Ptr,
-                                             "out_actual_i64");
-          Value *expectedC = ConstantInt::get(Type::getInt64Ty(ctx), expected);
+          Value *i8Ptr = builder.CreateBitCast(
+              outPtr, PointerType::getUnqual(Type::getInt8Ty(ctx)));
+          Value *actual =
+              builder.CreateLoad(Type::getInt8Ty(ctx), i8Ptr, "out_actual_i8");
+          Value *expectedC = ConstantInt::get(Type::getInt8Ty(ctx), expected);
           cmp = builder.CreateICmpEQ(actual, expectedC, "out_cmp");
         } else if (outAllocSize > 0) {
           Type *narrowTy = Type::getIntNTy(ctx, (unsigned)outAllocSize * 8);
@@ -1269,14 +1269,15 @@ int main(int argc, char **argv) {
     errs() << "Invalid IR after LabeledUnrollPass\n";
     return 1;
   }
-  std::string filename = "../results/" + funcName + "/" + funcName + ".ll";
+  std::string original = "../results/" + funcName + "/" + funcName + ".ll";
 
-  dump_module(*funcModule, filename);
-  outs() << "Wrote" << filename << "\n";
+  dump_module(*funcModule, original);
+  outs() << "Wrote" << original << "\n";
 
   // Clone and inject fault
-  filename = "../results/" + funcName + "/loopOrFuncSkip/" + funcName;
-
+  std::string faultyFile =
+      "../results/" + funcName + "/loopOrFuncSkip/" + funcName;
+  std::string outFile;
   if (mode == LOOP_SKIP) {
     auto faultModule = CloneModule(*funcModule);
 
@@ -1379,9 +1380,9 @@ int main(int argc, char **argv) {
     if (verifyModule(*faultModule, &errs())) {
       errs() << "Fault module has invalid IR\n";
     } else {
-      dump_module(*faultModule, filename + "_loopSkip.ll");
+      dump_module(*faultModule, faultyFile + "_loopSkip.ll");
 
-      outs() << "Wrote" << filename << "\n";
+      outs() << "Wrote" << faultyFile << "\n";
     }
 
   } else if (mode == FUNC_SKIP) {
@@ -1452,7 +1453,7 @@ int main(int argc, char **argv) {
     if (verifyModule(*preUnrollClone, &errs())) {
       errs() << "Fault module has invalid IR\n";
     } else {
-      std::string outFile = filename + "_fnSkip_" + skippedCalleeName +
+      outFile = faultyFile + "_fnSkip_" + skippedCalleeName +
                             "_line" + std::to_string(skipLine) + ".ll";
       dump_module(*preUnrollClone, outFile);
       outs() << "Wrote " << outFile << "\n";
@@ -1462,27 +1463,27 @@ int main(int argc, char **argv) {
     errs() << "Invalid mode. Use 0 or 1\n";
     return 1;
   }
+  outs() << faultyFile;
+  std::string bmcCmdCorrect = "../llvmbmc " + original +
+                              " --dump-solver-query "
+                              "-f main --var-suffix correct ";
+  run_command(bmcCmdCorrect);
+  run_command("cp /tmp/test.smt2 ../correct.smt2");
+  if (mode == LOOP_SKIP) {
+    std::string bmcCmdFaulty = "../llvmbmc " + faultyFile +
+                               " --dump-solver-query "
 
-  // std::string bmcCmdCorrect =
-  //     "../llvmbmc ../results/original.ll --dump-solver-query "
-  //     "-f main --var-suffix correct ";
-  // run_command(bmcCmdCorrect);
-  // run_command("cp /tmp/test.smt2 ../correct.smt2");
-  // if (mode == LOOP_SKIP) {
-  //   std::string bmcCmdFaulty =
-  //       "../llvmbmc ../results/loopOrFuncSkip/loopSkip.ll --dump-solver-query
-  //       "
-  //       "-f main --var-suffix faulty ";
-  //   run_command(bmcCmdFaulty);
-  //   run_command("cp /tmp/test.smt2 ../loopFault.smt2");
-  // } else {
-  //   std::string bmcCmdFaulty =
-  //       "../llvmbmc ../results/loopOrFuncSkip/funcSkip.ll --dump-solver-query
-  //       "
-  //       "-f main --var-suffix faulty ";
-  //   run_command(bmcCmdFaulty);
-  //   run_command("cp /tmp/test.smt2 ../funcSkip.smt2");
-  // }
+                               "-f main --var-suffix faulty ";
+    run_command(bmcCmdFaulty);
+    run_command("cp /tmp/test.smt2 ../loopFault.smt2");
+  } else {
+    std::string bmcCmdFaulty = "../llvmbmc " + outFile +
+                               " --smt-only "
+
+                               "-f main --var-suffix faulty ";
+    run_command(bmcCmdFaulty);
+    run_command("cp /tmp/test.smt2 ../funcSkip.smt2");
+  }
 
   return 0;
 }
