@@ -278,8 +278,8 @@ static void emitAssert(IRBuilder<> &builder, LLVMContext &ctx, Value *cond,
   if (!AssertFn) {
     FunctionType *AssertTy =
         FunctionType::get(Type::getVoidTy(ctx), {Type::getInt1Ty(ctx)}, false);
-    AssertFn = Function::Create(AssertTy, GlobalValue::ExternalLinkage,
-                                AssertName, M);
+    AssertFn =
+        Function::Create(AssertTy, GlobalValue::ExternalLinkage, AssertName, M);
     AssertFn->addParamAttr(0, Attribute::NoUndef);
     AssertFn->addParamAttr(0, Attribute::ZExt);
   }
@@ -377,7 +377,8 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
       root = traceArgToRoot(FirstCall->getArgOperand(i));
     }
 
-    bool haveJsonVal = i < positionalVals.size();
+    bool haveJsonVal =
+        i < positionalVals.size() && !positionalVals[i]->isString;
     uint64_t jsonVal = haveJsonVal ? positionalVals[i]->asUInt64() : 0;
     bool isOutputArg = ((int)i == outputArgPos);
     bool doStore = haveJsonVal && !isOutputArg;
@@ -483,55 +484,79 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
     const JsonValue &outVal = jsonGet(testcase, "output");
     if (outVal.isString) {
       std::string outKeyName = outVal.strVal;
+      if (outKeyName == "ret") {
 
-      int outPos = -1;
-      long long expected = 0;
-      bool foundExpected = false;
-      int pos = 0;
-      for (auto &kv : testcase) {
-        if (kv.first == "output")
-          continue;
-        if (kv.first == outKeyName) {
-          outPos = pos;
-          expected = kv.second.asInt();
-          foundExpected = true;
-        }
-        pos++;
-      }
-
-      if (outPos >= 0 && foundExpected &&
-          (size_t)outPos < argPtrsByPos.size() && argPtrsByPos[outPos]) {
-        Value *outPtr = argPtrsByPos[outPos];
-        uint64_t outAllocSize = argAllocSizeByPos[outPos];
-        Value *cmp = nullptr;
-        if (outAllocSize >= 8) {
-          Value *i64Ptr = builder.CreateBitCast(
-              outPtr, PointerType::getUnqual(Type::getInt64Ty(ctx)));
-          Value *actual = builder.CreateLoad(Type::getInt64Ty(ctx), i64Ptr,
-                                             "out_actual_i64");
-          Value *expectedC = ConstantInt::get(Type::getInt64Ty(ctx), expected);
-          cmp = builder.CreateICmpEQ(actual, expectedC, "out_cmp");
-        } else if (outAllocSize > 0) {
-          Type *narrowTy = Type::getIntNTy(ctx, (unsigned)outAllocSize * 8);
-          Value *narrowPtr =
-              builder.CreateBitCast(outPtr, PointerType::getUnqual(narrowTy));
-          Value *actual =
-              builder.CreateLoad(narrowTy, narrowPtr, "out_actual_narrow");
-          Value *expectedC = ConstantInt::get(narrowTy, expected);
-          cmp = builder.CreateICmpEQ(actual, expectedC, "out_cmp");
-        }
-
-        if (cmp) {
-          emitAssert(builder, ctx, cmp, driver);
-          errs() << "  Inserted output assertion: arg" << outPos << " ("
-                 << outKeyName << ") i64[0] == " << expected << "\n";
+        if (positionalVals.empty()) {
+          errs() << "  Warning: 'ret' output requested but testcase has no "
+                    "positional values\n";
+        } else if (TargetF->getReturnType()->isVoidTy()) {
+          errs() << "  Warning: 'ret' output requested but function has "
+                    "void return type\n";
+        } else if (!TargetF->getReturnType()->isIntegerTy()) {
+          errs() << "  Warning: 'ret' output requested but return type is "
+                    "not an integer\n";
         } else {
-          errs() << "  Warning: output buffer for '" << outKeyName
-                 << "' has zero size, skipping assertion\n";
+          long long expected = positionalVals.back()->asUInt64();
+          Type *retTy = TargetF->getReturnType();
+          Value *expectedC = ConstantInt::get(retTy, expected);
+          Value *cmp = builder.CreateICmpEQ(callI, expectedC, "out_cmp");
+
+          emitAssert(builder, ctx, cmp, driver);
+          errs() << "  Inserted output assertion: return value == " << expected
+                 << "\n";
         }
       } else {
-        errs() << "  Warning: could not resolve output assertion for '"
-               << outKeyName << "' (bad position or non-pointer arg)\n";
+
+        int outPos = -1;
+        long long expected = 0;
+        bool foundExpected = false;
+        int pos = 0;
+        for (auto &kv : testcase) {
+          if (kv.first == "output")
+            continue;
+          if (kv.first == outKeyName) {
+            outPos = pos;
+            expected = kv.second.asUInt64();
+            foundExpected = true;
+          }
+          pos++;
+        }
+
+        if (outPos >= 0 && foundExpected &&
+            (size_t)outPos < argPtrsByPos.size() && argPtrsByPos[outPos]) {
+          Value *outPtr = argPtrsByPos[outPos];
+          uint64_t outAllocSize = argAllocSizeByPos[outPos];
+
+          Value *cmp = nullptr;
+          if (outAllocSize >= 8) {
+            Value *i8Ptr = builder.CreateBitCast(
+                outPtr, PointerType::getUnqual(Type::getInt8Ty(ctx)));
+            Value *actual = builder.CreateLoad(Type::getInt8Ty(ctx), i8Ptr,
+                                               "out_actual_i8");
+            Value *expectedC = ConstantInt::get(Type::getInt8Ty(ctx), expected);
+            cmp = builder.CreateICmpEQ(actual, expectedC, "out_cmp");
+          } else if (outAllocSize > 0) {
+            Type *narrowTy = Type::getIntNTy(ctx, (unsigned)outAllocSize * 8);
+            Value *narrowPtr =
+                builder.CreateBitCast(outPtr, PointerType::getUnqual(narrowTy));
+            Value *actual =
+                builder.CreateLoad(narrowTy, narrowPtr, "out_actual_narrow");
+            Value *expectedC = ConstantInt::get(narrowTy, expected);
+            cmp = builder.CreateICmpEQ(actual, expectedC, "out_cmp");
+          }
+
+          if (cmp) {
+            emitAssert(builder, ctx, cmp, driver);
+            errs() << "  Inserted output assertion: arg" << outPos << " ("
+                   << outKeyName << ") i64[0] == " << expected << "\n";
+          } else {
+            errs() << "  Warning: output buffer for '" << outKeyName
+                   << "' has zero size, skipping assertion\n";
+          }
+        } else {
+          errs() << "  Warning: could not resolve output assertion for '"
+                 << outKeyName << "' (bad position or non-pointer arg)\n";
+        }
       }
     }
   }
