@@ -785,8 +785,19 @@ public:
            << (CI->getCalledFunction() ? CI->getCalledFunction()->getName()
                                        : "<indirect>")
            << "\n";
-    if (!CI->getType()->isVoidTy() && CI->arg_size() > 0)
-      CI->replaceAllUsesWith(CI->getArgOperand(0));
+    Value *replacement = nullptr;
+    if (!CI->getType()->isVoidTy()) {
+      if (CI->arg_size() > 0 &&
+          CI->getArgOperand(0)->getType() == CI->getType()) {
+        replacement = CI->getArgOperand(0);
+      } else {
+        replacement = Constant::getNullValue(CI->getType());
+        // or: IRBuilder<>(CI).CreateZExtOrTrunc(CI->getArgOperand(0),
+        // CI->getType());
+      }
+    }
+    if (replacement)
+      CI->replaceAllUsesWith(replacement);
     CI->eraseFromParent();
 
     return PreservedAnalyses::none();
