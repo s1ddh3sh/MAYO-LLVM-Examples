@@ -921,7 +921,25 @@ void replaceMemoryIntrinsics(Module &M, Module &SourceM) {
     }
   }
 }
+void stripOutputAssertions(Module &M) {
+  const char *AssertName = "_Z6assertb";
+  Function *AssertFn = M.getFunction(AssertName);
+  if (!AssertFn)
+    return;
 
+  SmallVector<CallInst *, 8> ToErase;
+  for (User *U : AssertFn->users()) {
+    if (auto *CI = dyn_cast<CallInst>(U)) {
+      if (CI->getCalledFunction() == AssertFn)
+        ToErase.push_back(CI);
+    }
+  }
+  for (CallInst *CI : ToErase)
+    CI->eraseFromParent();
+
+  if (AssertFn->use_empty())
+    AssertFn->eraseFromParent();
+}
 void cleanup(Module &M) {
   for (auto FI = M.begin(); FI != M.end();) {
 
@@ -1161,7 +1179,7 @@ int main(int argc, char **argv) {
   for (auto &fe : faults) {
 
     auto cloned = CloneModule(*funcModule);
-
+    stripOutputAssertions(*cloned); 
     LoopAnalysisManager LAM;
     FunctionAnalysisManager FAM;
     CGSCCAnalysisManager CGAM;

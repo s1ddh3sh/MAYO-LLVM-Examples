@@ -1067,6 +1067,26 @@ void replaceMemoryIntrinsics(Module &M, Module &SourceM) {
   }
 }
 
+void stripOutputAssertions(Module &M) {
+  const char *AssertName = "_Z6assertb";
+  Function *AssertFn = M.getFunction(AssertName);
+  if (!AssertFn)
+    return;
+
+  SmallVector<CallInst *, 8> ToErase;
+  for (User *U : AssertFn->users()) {
+    if (auto *CI = dyn_cast<CallInst>(U)) {
+      if (CI->getCalledFunction() == AssertFn)
+        ToErase.push_back(CI);
+    }
+  }
+  for (CallInst *CI : ToErase)
+    CI->eraseFromParent();
+
+  if (AssertFn->use_empty())
+    AssertFn->eraseFromParent();
+}
+
 void cleanup(Module &M) {
   for (auto FI = M.begin(); FI != M.end();) {
 
@@ -1230,6 +1250,7 @@ int main(int argc, char **argv) {
   std::unique_ptr<Module> preUnrollClone;
   if (mode == FUNC_SKIP) {
     preUnrollClone = CloneModule(*funcModule);
+    stripOutputAssertions(*preUnrollClone);
   }
 
   // Unroll for original.ll
@@ -1315,7 +1336,7 @@ int main(int argc, char **argv) {
   std::string outFile;
   if (mode == LOOP_SKIP) {
     auto faultModule = CloneModule(*funcModule);
-
+    stripOutputAssertions(*faultModule);
     unsigned skipIter = 1;
     Function *faultFunc = faultModule->getFunction(funcName);
     if (faultFunc) {
@@ -1522,7 +1543,7 @@ int main(int argc, char **argv) {
       targetSmt2.replace(dotPos, std::string::npos, ".smt2");
     }
     std::string bmcCmdFaulty = "../llvmbmc " + outFile +
-                               " --smt-only "
+                               " --dump-solver-query "
 
                                "-f main --var-suffix faulty ";
     run_command(bmcCmdFaulty);
