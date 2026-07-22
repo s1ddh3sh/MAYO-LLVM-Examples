@@ -185,7 +185,10 @@ int main() {
   expr store_C2 = extract_store(c16_C2);
   expr store_F2 = extract_store(c16_F2);
 
-//   cout << store_F2 << endl;
+  cout << store_C1 << endl;
+  cout << store_F1 << endl;
+  cout << store_C2 << endl;
+  cout << store_F2 << endl;
   //   expr s_byte0_correct = select(store_c, store_index(store_c));
 
   //   expr s_byte0_faulty = select(store_f, store_index(store_f));
