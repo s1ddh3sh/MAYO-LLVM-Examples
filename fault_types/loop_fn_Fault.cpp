@@ -1325,14 +1325,14 @@ int main(int argc, char **argv) {
     errs() << "Invalid IR after LabeledUnrollPass\n";
     return 1;
   }
-  std::string original = "../results/" + funcName + "/" + funcName + ".ll";
+  std::string original = "../../results/" + funcName + "/" + funcName + ".ll";
 
   dump_module(*funcModule, original);
   outs() << "Wrote" << original << "\n";
 
   // Clone and inject fault
   std::string faultyFile =
-      "../results/" + funcName + "/loopOrFuncSkip/" + funcName;
+      "../../results/" + funcName + "/loopOrFuncSkip/" + funcName;
   std::string outFile;
   if (mode == LOOP_SKIP) {
     auto faultModule = CloneModule(*funcModule);

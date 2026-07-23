@@ -1140,7 +1140,7 @@ int main(int argc, char **argv) {
     errs() << "Invalid IR\n";
     return 1;
   }
-  std::string filename = "../results/" + funcName + "/";
+  std::string filename = "../../results/" + funcName + "/";
   // std::string filename = "../results/" + funcName + ".ll";
   dump_module(*funcModule, filename + funcName + ".ll");
   outs() << "Wrote" << filename << funcName << "\n";
