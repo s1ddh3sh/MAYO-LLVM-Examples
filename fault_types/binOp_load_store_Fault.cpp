@@ -421,10 +421,12 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
         if (auto *AI = dyn_cast<AllocaInst>(root)) {
           Type *allocTy = AI->getAllocatedType();
           std::string name = AI->getName().str();
+          MDNode *N = MDNode::get(ctx, MDString::get(ctx, name));
           if (name.empty())
             name = "buf";
           AllocaInst *newAlloc = builder.CreateAlloca(allocTy, nullptr, name);
           newAlloc->setAlignment(Align(16));
+          newAlloc->setMetadata("llvmbmc.var", N);
           allocSize = ExtractedM.getDataLayout().getTypeAllocSize(allocTy);
 
           zeroFillThenStoreU64(builder, ctx, newAlloc, allocSize, doStore,
@@ -443,10 +445,12 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
         } else if (auto *GV = dyn_cast<GlobalVariable>(root)) {
           Type *valTy = GV->getValueType();
           std::string name = GV->getName().str();
+          MDNode *N = MDNode::get(ctx, MDString::get(ctx, name));
           if (name.empty())
             name = "buf";
           AllocaInst *newAlloc = builder.CreateAlloca(valTy, nullptr, name);
           newAlloc->setAlignment(Align(16));
+          newAlloc->setMetadata("llvmbmc.var", N);
           allocSize = ExtractedM.getDataLayout().getTypeAllocSize(valTy);
           zeroFillThenStoreU64(builder, ctx, newAlloc, allocSize, doStore,
                                jsonVal);
@@ -468,7 +472,9 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
         ArrayType *arrTy = ArrayType::get(Type::getInt8Ty(ctx), fallbackSize);
         AllocaInst *alloc =
             builder.CreateAlloca(arrTy, nullptr, arg->getName() + "_buf");
+        MDNode *N = MDNode::get(ctx, MDString::get(ctx, alloc->getName()));
         alloc->setAlignment(Align(16));
+        alloc->setMetadata("llvmbmc.var", N);
         allocSize = fallbackSize;
 
         zeroFillThenStoreU64(builder, ctx, alloc, fallbackSize, doStore,
