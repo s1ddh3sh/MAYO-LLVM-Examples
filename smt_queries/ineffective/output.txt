@@ -1,0 +1,418 @@
+================ DEBUG / SANITY CHECK ================
+Baseline setup SAT check (no divergence forced): SAT
+
+Index [0] Address Expression:
+  (+ 858 i_9_s_correct_C1)
+Index [0] Array Select (Correct C2):
+  (select c_93_Global_M_correct_C2 (+ 858 i_9_s_correct_C1))
+Index [0] Array Select (Faulty F2):
+  (select c_93_Global_M_faulty_F2 (+ 858 i_9_s_correct_C1))
+======================================================
+
+Checking divergence at output index [0] only...
+Checking Index [0] with expression: (distinct (select c_93_Global_M_correct_C2 (+ 858 i_9_s_correct_C1))
+          (select c_93_Global_M_faulty_F2 (+ 858 i_9_s_correct_C1))) ... SAT!
+
+======================================================
+SAT — found divergence target at output index [0]
+======================================================
+
+-- Vdec (shared, both executions) --
+  [0] 1
+  [1] 1
+  [2] 1
+  [3] 1
+  [4] 1
+  [5] 1
+  [6] 1
+  [7] 1
+  [8] 1
+  [9] 1
+  [10] 1
+  [11] 1
+  [12] 1
+  [13] 1
+  [14] 1
+  [15] 1
+  [16] 1
+  [17] 1
+  [18] 1
+  [19] 1
+  [20] 1
+  [21] 1
+  [22] 1
+  [23] 1
+  [24] 1
+  [25] 1
+  [26] 1
+  [27] 1
+  [28] 1
+  [29] 1
+  [30] 1
+  [31] 1
+  [32] 1
+  [33] 1
+  [34] 1
+  [35] 1
+  [36] 1
+  [37] 1
+  [38] 1
+  [39] 1
+  [40] 1
+  [41] 1
+  [42] 1
+  [43] 1
+  [44] 1
+  [45] 1
+  [46] 1
+  [47] 1
+  [48] 1
+  [49] 1
+  [50] 1
+  [51] 1
+  [52] 1
+  [53] 1
+  [54] 1
+  [55] 1
+  [56] 1
+  [57] 1
+  [58] 1
+  [59] 1
+  [60] 1
+  [61] 1
+  [62] 1
+  [63] 1
+  [64] 1
+  [65] 1
+  [66] 1
+  [67] 1
+  [68] 1
+  [69] 1
+  [70] 1
+  [71] 1
+  [72] 1
+  [73] 1
+  [74] 1
+  [75] 1
+  [76] 1
+  [77] 1
+
+-- Ox execution 1 --
+  [0] 112
+  [1] 151
+  [2] 89
+  [3] 94
+  [4] 17
+  [5] 157
+  [6] 75
+  [7] 63
+  [8] 156
+  [9] 70
+  [10] 249
+  [11] 245
+  [12] 6
+  [13] 251
+  [14] 8
+  [15] 129
+  [16] 43
+  [17] 159
+  [18] 56
+  [19] 90
+  [20] 244
+  [21] 36
+  [22] 202
+  [23] 95
+  [24] 53
+  [25] 145
+  [26] 148
+  [27] 54
+  [28] 127
+  [29] 122
+  [30] 163
+  [31] 153
+  [32] 124
+  [33] 30
+  [34] 65
+  [35] 203
+  [36] 110
+  [37] 242
+  [38] 196
+  [39] 59
+  [40] 253
+  [41] 235
+  [42] 74
+  [43] 217
+  [44] 155
+  [45] 46
+  [46] 211
+  [47] 92
+  [48] 7
+  [49] 162
+  [50] 146
+  [51] 164
+  [52] 91
+  [53] 40
+  [54] 239
+  [55] 72
+  [56] 62
+  [57] 166
+  [58] 34
+  [59] 41
+  [60] 190
+  [61] 134
+  [62] 69
+  [63] 179
+  [64] 23
+  [65] 44
+  [66] 64
+  [67] 37
+  [68] 177
+  [69] 15
+  [70] 86
+  [71] 234
+  [72] 42
+  [73] 28
+  [74] 216
+  [75] 123
+  [76] 87
+  [77] 139
+
+-- Ox execution 2 --
+  [0] 113
+  [1] 151
+  [2] 89
+  [3] 94
+  [4] 17
+  [5] 157
+  [6] 75
+  [7] 63
+  [8] 156
+  [9] 70
+  [10] 249
+  [11] 245
+  [12] 6
+  [13] 251
+  [14] 8
+  [15] 129
+  [16] 43
+  [17] 159
+  [18] 56
+  [19] 90
+  [20] 244
+  [21] 36
+  [22] 202
+  [23] 95
+  [24] 53
+  [25] 145
+  [26] 148
+  [27] 54
+  [28] 127
+  [29] 122
+  [30] 163
+  [31] 153
+  [32] 124
+  [33] 30
+  [34] 65
+  [35] 203
+  [36] 110
+  [37] 242
+  [38] 196
+  [39] 59
+  [40] 253
+  [41] 235
+  [42] 74
+  [43] 217
+  [44] 155
+  [45] 46
+  [46] 211
+  [47] 92
+  [48] 7
+  [49] 162
+  [50] 146
+  [51] 164
+  [52] 91
+  [53] 40
+  [54] 239
+  [55] 72
+  [56] 62
+  [57] 166
+  [58] 34
+  [59] 41
+  [60] 190
+  [61] 134
+  [62] 69
+  [63] 179
+  [64] 23
+  [65] 44
+  [66] 64
+  [67] 37
+  [68] 177
+  [69] 15
+  [70] 86
+  [71] 234
+  [72] 42
+  [73] 28
+  [74] 216
+  [75] 123
+  [76] 87
+  [77] 139
+
+-- Output region, execution 1 (masked) --
+  [0] correct=1 faulty=1
+  [1] correct=1 faulty=1
+  [2] correct=1 faulty=1
+  [3] correct=1 faulty=1
+  [4] correct=1 faulty=1
+  [5] correct=1 faulty=1
+  [6] correct=1 faulty=1
+  [7] correct=1 faulty=1
+  [8] correct=1 faulty=1
+  [9] correct=1 faulty=1
+  [10] correct=1 faulty=1
+  [11] correct=1 faulty=1
+  [12] correct=1 faulty=1
+  [13] correct=1 faulty=1
+  [14] correct=1 faulty=1
+  [15] correct=1 faulty=1
+  [16] correct=1 faulty=1
+  [17] correct=1 faulty=1
+  [18] correct=1 faulty=1
+  [19] correct=1 faulty=1
+  [20] correct=1 faulty=1
+  [21] correct=1 faulty=1
+  [22] correct=1 faulty=1
+  [23] correct=1 faulty=1
+  [24] correct=1 faulty=1
+  [25] correct=1 faulty=1
+  [26] correct=1 faulty=1
+  [27] correct=1 faulty=1
+  [28] correct=1 faulty=1
+  [29] correct=1 faulty=1
+  [30] correct=1 faulty=1
+  [31] correct=1 faulty=1
+  [32] correct=1 faulty=1
+  [33] correct=1 faulty=1
+  [34] correct=1 faulty=1
+  [35] correct=1 faulty=1
+  [36] correct=1 faulty=1
+  [37] correct=1 faulty=1
+  [38] correct=1 faulty=1
+  [39] correct=1 faulty=1
+  [40] correct=1 faulty=1
+  [41] correct=1 faulty=1
+  [42] correct=1 faulty=1
+  [43] correct=1 faulty=1
+  [44] correct=1 faulty=1
+  [45] correct=1 faulty=1
+  [46] correct=1 faulty=1
+  [47] correct=1 faulty=1
+  [48] correct=1 faulty=1
+  [49] correct=1 faulty=1
+  [50] correct=1 faulty=1
+  [51] correct=1 faulty=1
+  [52] correct=1 faulty=1
+  [53] correct=1 faulty=1
+  [54] correct=1 faulty=1
+  [55] correct=1 faulty=1
+  [56] correct=1 faulty=1
+  [57] correct=1 faulty=1
+  [58] correct=1 faulty=1
+  [59] correct=1 faulty=1
+  [60] correct=1 faulty=1
+  [61] correct=1 faulty=1
+  [62] correct=1 faulty=1
+  [63] correct=1 faulty=1
+  [64] correct=1 faulty=1
+  [65] correct=1 faulty=1
+  [66] correct=1 faulty=1
+  [67] correct=1 faulty=1
+  [68] correct=1 faulty=1
+  [69] correct=1 faulty=1
+  [70] correct=1 faulty=1
+  [71] correct=1 faulty=1
+  [72] correct=1 faulty=1
+  [73] correct=1 faulty=1
+  [74] correct=1 faulty=1
+  [75] correct=1 faulty=1
+  [76] correct=1 faulty=1
+  [77] correct=1 faulty=1
+
+-- Output region, execution 2 (observable target index: 0) --
+  [0] correct=2 faulty=1  <-- DIFFERS
+  [1] correct=1 faulty=1
+  [2] correct=1 faulty=1
+  [3] correct=1 faulty=1
+  [4] correct=1 faulty=1
+  [5] correct=1 faulty=1
+  [6] correct=1 faulty=1
+  [7] correct=1 faulty=1
+  [8] correct=1 faulty=1
+  [9] correct=1 faulty=1
+  [10] correct=1 faulty=1
+  [11] correct=1 faulty=1
+  [12] correct=1 faulty=1
+  [13] correct=1 faulty=1
+  [14] correct=1 faulty=1
+  [15] correct=1 faulty=1
+  [16] correct=1 faulty=1
+  [17] correct=1 faulty=1
+  [18] correct=1 faulty=1
+  [19] correct=1 faulty=1
+  [20] correct=1 faulty=1
+  [21] correct=1 faulty=1
+  [22] correct=1 faulty=1
+  [23] correct=1 faulty=1
+  [24] correct=1 faulty=1
+  [25] correct=1 faulty=1
+  [26] correct=1 faulty=1
+  [27] correct=1 faulty=1
+  [28] correct=1 faulty=1
+  [29] correct=1 faulty=1
+  [30] correct=1 faulty=1
+  [31] correct=1 faulty=1
+  [32] correct=1 faulty=1
+  [33] correct=1 faulty=1
+  [34] correct=1 faulty=1
+  [35] correct=1 faulty=1
+  [36] correct=1 faulty=1
+  [37] correct=1 faulty=1
+  [38] correct=1 faulty=1
+  [39] correct=1 faulty=1
+  [40] correct=1 faulty=1
+  [41] correct=1 faulty=1
+  [42] correct=1 faulty=1
+  [43] correct=1 faulty=1
+  [44] correct=1 faulty=1
+  [45] correct=1 faulty=1
+  [46] correct=1 faulty=1
+  [47] correct=1 faulty=1
+  [48] correct=1 faulty=1
+  [49] correct=1 faulty=1
+  [50] correct=1 faulty=1
+  [51] correct=1 faulty=1
+  [52] correct=1 faulty=1
+  [53] correct=1 faulty=1
+  [54] correct=1 faulty=1
+  [55] correct=1 faulty=1
+  [56] correct=1 faulty=1
+  [57] correct=1 faulty=1
+  [58] correct=1 faulty=1
+  [59] correct=1 faulty=1
+  [60] correct=1 faulty=1
+  [61] correct=1 faulty=1
+  [62] correct=1 faulty=1
+  [63] correct=1 faulty=1
+  [64] correct=1 faulty=1
+  [65] correct=1 faulty=1
+  [66] correct=1 faulty=1
+  [67] correct=1 faulty=1
+  [68] correct=1 faulty=1
+  [69] correct=1 faulty=1
+  [70] correct=1 faulty=1
+  [71] correct=1 faulty=1
+  [72] correct=1 faulty=1
+  [73] correct=1 faulty=1
+  [74] correct=1 faulty=1
+  [75] correct=1 faulty=1
+  [76] correct=1 faulty=1
+  [77] correct=1 faulty=1

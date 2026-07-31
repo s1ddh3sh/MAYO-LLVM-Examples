@@ -92,8 +92,8 @@ struct ArrayRegion {
 static const string GLOBAL_BASE_CORRECT = "Global_M_correct";
 static const string GLOBAL_BASE_FAULTY = "Global_M_faulty";
 
-static const string INITIAL_VERSION_CORRECT = "c_1";
-static const string INITIAL_VERSION_FAULTY = "c_1";
+static const string INITIAL_VERSION_CORRECT = "c_15";
+static const string INITIAL_VERSION_FAULTY = "c_15";
 static const string FINAL_VERSION_CORRECT = "c_93";
 static const string FINAL_VERSION_FAULTY = "c_93";
 
@@ -111,7 +111,10 @@ static expr region_ptr(context &ctx, const ArrayRegion &r,
   string name = isFaultyTrace ? swap_correct_faulty(r.index_var) : r.index_var;
   return ctx.int_const((name + "_" + traceTag).c_str());
 }
-
+string strip_bad_asserts(const string &src) {
+  regex bad_assert(R"(\(assert\s+and\s*\)\s*)");
+  return regex_replace(src, bad_assert, "");
+}
 int main(int argc, char **argv) {
   if (argc < 2) {
     cerr << "Usage: ./differential_query <fnName>\n";
@@ -134,8 +137,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  string correct_src = strip_last_top_level_assert(read_file(correct_path));
-  string faulty_src = strip_last_top_level_assert(read_file(faulty_path));
+  string correct_src = strip_bad_asserts(strip_last_top_level_assert(read_file(correct_path)));
+  string faulty_src = strip_bad_asserts(strip_last_top_level_assert(read_file(faulty_path)));
 
   string c1 = write_suffixed(correct_src, "C1", fn_path);
   string f1 = write_suffixed(faulty_src, "F1", fn_path);
