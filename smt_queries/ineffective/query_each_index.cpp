@@ -150,7 +150,7 @@ int main(int argc, char **argv) {
   params p(ctx);
   p.set("timeout", 300000u);
 
-  solver slv(ctx, "QF_AUFLIA");
+  solver slv(ctx);
   // slv.set(p);
 
   expr_vector C1 = ctx.parse_file(c1.c_str());
