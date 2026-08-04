@@ -346,7 +346,7 @@ int main(int argc, char **argv) {
       cout << "  [" << i << "] " << ev(o2i) << "\n";
     }
 
-    cout << "\n-- Output region, execution 1 (masked) --\n";
+    cout << "\n-- Output region, execution 1 --\n";
     for (long long i = 0; i < OUTPUT_REGION.length; i++) {
       expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
       expr cv = ev(select(finC1, addr));
@@ -355,7 +355,7 @@ int main(int argc, char **argv) {
            << (z3::eq(cv, fv) ? "" : "  <-- DIFFERS") << "\n";
     }
 
-    cout << "\n-- Output region, execution 2 (observable target index: 0) --\n";
+    cout << "\n-- Output region, execution 2 --\n";
     for (long long i = 0; i < OUTPUT_REGION.length; i++) {
       expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
       expr cv = ev(select(finC2, addr));
