@@ -137,8 +137,10 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  string correct_src = strip_bad_asserts(strip_last_top_level_assert(read_file(correct_path)));
-  string faulty_src = strip_bad_asserts(strip_last_top_level_assert(read_file(faulty_path)));
+  string correct_src =
+      strip_bad_asserts(strip_last_top_level_assert(read_file(correct_path)));
+  string faulty_src =
+      strip_bad_asserts(strip_last_top_level_assert(read_file(faulty_path)));
 
   string c1 = write_suffixed(correct_src, "C1", fn_path);
   string f1 = write_suffixed(faulty_src, "F1", fn_path);
@@ -150,7 +152,9 @@ int main(int argc, char **argv) {
   params p(ctx);
   p.set("timeout", 300000u);
 
-  solver slv(ctx);
+  // solver slv(ctx);
+  solver slv(ctx, "QF_AUFLIA");
+
   // slv.set(p);
 
   expr_vector C1 = ctx.parse_file(c1.c_str());
@@ -237,19 +241,20 @@ int main(int argc, char **argv) {
     slv.add(o1i < ctx.int_val(256));
     slv.add(o2i >= ctx.int_val(0));
     slv.add(o2i < ctx.int_val(256));
-    if (i == 0) {
-      inputDiffs.push_back(o1i != o2i);
-    } else {
-      slv.add(o1i == o2i); // pin every other index equal across exec1/exec2
-    }
+    // if (i == 0) {
+    // inputDiffs.push_back(o1i != o2i);
+    // } else {
+    slv.add(o1i != o2i);
+    // }
   }
-  slv.add(mk_or(inputDiffs));
+  // slv.add(mk_or(inputDiffs));
 
   // ---- Output comparison: Execution 1 (Masked) ----
   for (long long i = 0; i < OUTPUT_REGION.length; i++) {
     expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
     expr c1v = select(finC1, addr);
     expr f1v = select(finF1, addr);
+    // if (i == 0)
     slv.add(c1v == f1v);
     slv.add(c1v >= ctx.int_val(0));
     slv.add(c1v < ctx.int_val(256));
@@ -257,28 +262,36 @@ int main(int argc, char **argv) {
     slv.add(f1v < ctx.int_val(256));
   }
 
-  // =====================================================================
-  // DEBUG / SANITY CHECK SECTION
-  // =====================================================================
-  cout << "================ DEBUG / SANITY CHECK ================\n";
+  for (long long i = 0; i < OUTPUT_REGION.length; i++) {
+    expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
+
+    expr c2v = select(finC2, addr);
+    expr f2v = select(finF2, addr);
+
+    slv.add(c2v >= ctx.int_val(0));
+    slv.add(c2v < ctx.int_val(256));
+    slv.add(f2v >= ctx.int_val(0));
+    slv.add(f2v < ctx.int_val(256));
+  }
 
   // 1. Check if the baseline setup itself is SAT without forcing any output
   // divergence
-  slv.push();
-  check_result base_res = slv.check();
-  cout << "Baseline setup SAT check (no divergence forced): "
-       << (base_res == sat ? "SAT" : (base_res == unsat ? "UNSAT" : "TIMEOUT"))
-       << "\n";
+  // slv.push();
+  // check_result base_res = slv.check();
+  // cout << "Baseline setup SAT check (no divergence forced): "
+  //      << (base_res == sat ? "SAT" : (base_res == unsat ? "UNSAT" :
+  //      "TIMEOUT"))
+  //      << "\n";
 
-  if (base_res != sat) {
-    cout << "[!] CRITICAL ERROR: The base 4-trace framework is UNSAT or "
-            "TIMEOUT before adding any output divergence!\n";
-    cout << "    This means input setup, trace concatenation, or pointer "
-            "pinning creates a contradiction.\n";
-    slv.pop();
-    return 1;
-  }
-  slv.pop();
+  // if (base_res != sat) {
+  //   cout << "[!] CRITICAL ERROR: The base 4-trace framework is UNSAT or "
+  //           "TIMEOUT before adding any output divergence!\n";
+  //   cout << "    This means input setup, trace concatenation, or pointer "
+  //           "pinning creates a contradiction.\n";
+  //   slv.pop();
+  //   return 1;
+  // }
+  // slv.pop();
 
   // 2. Print exact AST expressions being evaluated for Index [0]
   expr addr_0 = ctx.int_val((int)(OUTPUT_REGION.offset + 0)) + sPtr;
@@ -288,25 +301,21 @@ int main(int argc, char **argv) {
   cout << "\nIndex [0] Address Expression:\n  " << addr_0 << "\n";
   cout << "Index [0] Array Select (Correct C2):\n  " << sel_C2_0 << "\n";
   cout << "Index [0] Array Select (Faulty F2):\n  " << sel_F2_0 << "\n";
-  cout << "======================================================\n\n";
-  // =====================================================================
-  // CHECK OUTPUT INDEX 0 ONLY
-  // =====================================================================
-  cout << "Checking divergence at output index [0] only...\n";
+  // cout << "Checking divergence at output index [0] only...\n";
 
-  slv.push();
+  // slv.push();
 
-  expr addr_0_check = ctx.int_val((int)(OUTPUT_REGION.offset + 0)) + sPtr;
-  expr c2_val_0 = select(finC2, addr_0_check);
-  expr f2_val_0 = select(finF2, addr_0_check);
-  slv.add(c2_val_0 >= ctx.int_val(0));
-  slv.add(c2_val_0 < ctx.int_val(256));
-  slv.add(f2_val_0 >= ctx.int_val(0));
-  slv.add(f2_val_0 < ctx.int_val(256));
-  slv.add(c2_val_0 != f2_val_0);
+  // expr addr_0_check = ctx.int_val((int)(OUTPUT_REGION.offset + 0)) + sPtr;
+  // expr c2_val_0 = select(finC2, addr_0_check);
+  // expr f2_val_0 = select(finF2, addr_0_check);
+  // slv.add(c2_val_0 >= ctx.int_val(0));
+  // slv.add(c2_val_0 < ctx.int_val(256));
+  // slv.add(f2_val_0 >= ctx.int_val(0));
+  // slv.add(f2_val_0 < ctx.int_val(256));
+  // slv.add(c2_val_0 != f2_val_0);
 
-  cout << "Checking Index [0] with expression: " << (c2_val_0 != f2_val_0)
-       << " ... " << flush;
+  // cout << "Checking Index [0] with expression: " << (c2_val_0 != f2_val_0)
+  //      << " ... " << flush;
 
   check_result res = slv.check();
 
@@ -365,7 +374,7 @@ int main(int argc, char **argv) {
     cout << "UNKNOWN / TIMEOUT\n";
   }
 
-  slv.pop();
+  // slv.pop();
 
   return 0;
 }
