@@ -410,4 +410,3 @@ SAT — found divergence target at output index [0]
   [75] correct=29 faulty=29
   [76] correct=117 faulty=117
   [77] correct=95 faulty=95
-./ineffective_query mat_add  405.41s user 0.36s system 99% cpu 6:45.83 total

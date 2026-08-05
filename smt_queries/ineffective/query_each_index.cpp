@@ -94,12 +94,12 @@ static const string GLOBAL_BASE_FAULTY = "Global_M_faulty";
 
 static const string INITIAL_VERSION_CORRECT = "c_15";
 static const string INITIAL_VERSION_FAULTY = "c_15";
-static const string FINAL_VERSION_CORRECT = "c_93";
-static const string FINAL_VERSION_FAULTY = "c_93";
+static const string FINAL_VERSION_CORRECT = "c_22";
+static const string FINAL_VERSION_FAULTY = "c_22";
 
-static const ArrayRegion INPUT_SHARED = {"Vdec", "i_2_Vdec_correct", 780, 78};
+static const ArrayRegion INPUT_SHARED = {"sk", "i_2_sk_correct", 0, 8};
 static const ArrayRegion INPUT_VARIED = {"Ox", "i_4_Ox_correct", 780, 78};
-static const ArrayRegion OUTPUT_REGION = {"s", "i_9_s_correct", 858, 78};
+static const ArrayRegion OUTPUT_REGION = {"Pv", "i_6_Pv_correct", 858, 78};
 
 static string array_name(const string &version, const string &base,
                          const string &traceTag) {
