@@ -78,10 +78,6 @@ static void assert_no_overlap(solver &slv, context &ctx, expr startA,
   expr endB = startB + ctx.int_val((int)lenB);
   slv.add(endA <= startB || endB <= startA);
 }
-// =====================================================================
-// Configuration Structures
-// =====================================================================
-
 struct ArrayRegion {
   string label;
   string index_var;
@@ -92,14 +88,14 @@ struct ArrayRegion {
 static const string GLOBAL_BASE_CORRECT = "Global_M_correct";
 static const string GLOBAL_BASE_FAULTY = "Global_M_faulty";
 
-static const string INITIAL_VERSION_CORRECT = "c_15";
-static const string INITIAL_VERSION_FAULTY = "c_15";
-static const string FINAL_VERSION_CORRECT = "c_22";
-static const string FINAL_VERSION_FAULTY = "c_22";
+static string INITIAL_VERSION_CORRECT = "c_1";
+static string INITIAL_VERSION_FAULTY = "c_1";
+static const string FINAL_VERSION_CORRECT = "c_93";
+static const string FINAL_VERSION_FAULTY = "c_93";
 
-static const ArrayRegion INPUT_SHARED = {"sk", "i_2_sk_correct", 0, 8};
+static const ArrayRegion INPUT_SHARED = {"Vdec", "i_2_Vdec_correct", 780, 78};
 static const ArrayRegion INPUT_VARIED = {"Ox", "i_4_Ox_correct", 780, 78};
-static const ArrayRegion OUTPUT_REGION = {"Pv", "i_6_Pv_correct", 858, 78};
+static const ArrayRegion OUTPUT_REGION = {"s", "i_9_s_correct", 858, 78};
 
 static string array_name(const string &version, const string &base,
                          const string &traceTag) {
@@ -115,6 +111,51 @@ string strip_bad_asserts(const string &src) {
   regex bad_assert(R"(\(assert\s+and\s*\)\s*)");
   return regex_replace(src, bad_assert, "");
 }
+
+static string find_initial_version(const string &src, const string &base,
+                                   const string &finalVersion) {
+  string current = finalVersion;
+  static const regex numRe(R"(c_(\d+)_)");
+  while (true) {
+    string target = current + "_" + base;
+    size_t defPos = src.find("(= " + target);
+    if (defPos == string::npos)
+      return current;
+
+    size_t assertStart = src.rfind("(assert", defPos);
+    if (assertStart == string::npos)
+      return current;
+
+    string head = src.substr(assertStart, defPos - assertStart);
+    if (head.find("(and (=>") != string::npos)
+      return current; // guarded -- this is the true initial version
+
+    int depth = 0;
+    size_t end = string::npos;
+    for (size_t i = assertStart; i < src.size(); i++) {
+      if (src[i] == '(')
+        depth++;
+      else if (src[i] == ')') {
+        depth--;
+        if (depth == 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    string block = src.substr(assertStart, end - assertStart + 1);
+
+    smatch m;
+    if (!regex_search(current, m, numRe))
+      return current;
+    int n = stoi(m[1].str());
+    string predName = "c_" + to_string(n - 1) + "_" + base;
+    if (block.find(predName) == string::npos)
+      return current;
+    current = predName;
+  }
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     cerr << "Usage: ./differential_query <fnName>\n";
@@ -142,6 +183,11 @@ int main(int argc, char **argv) {
   string faulty_src =
       strip_bad_asserts(strip_last_top_level_assert(read_file(faulty_path)));
 
+  INITIAL_VERSION_CORRECT = find_initial_version(
+      correct_src, GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT);
+  INITIAL_VERSION_FAULTY = find_initial_version(faulty_src, GLOBAL_BASE_FAULTY,
+                                                FINAL_VERSION_FAULTY);
+
   string c1 = write_suffixed(correct_src, "C1", fn_path);
   string f1 = write_suffixed(faulty_src, "F1", fn_path);
   string c2 = write_suffixed(correct_src, "C2", fn_path);
@@ -152,8 +198,8 @@ int main(int argc, char **argv) {
   params p(ctx);
   p.set("timeout", 300000u);
 
-  // solver slv(ctx);
-  solver slv(ctx, "QF_AUFLIA");
+  solver slv(ctx);
+  // solver slv(ctx, "QF_AUFLIA");
 
   // slv.set(p);
 
@@ -249,7 +295,7 @@ int main(int argc, char **argv) {
   }
   // slv.add(mk_or(inputDiffs));
 
-  // ---- Output comparison: Execution 1 (Masked) ----
+  // ---- Output 1 ----
   for (long long i = 0; i < OUTPUT_REGION.length; i++) {
     expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
     expr c1v = select(finC1, addr);
