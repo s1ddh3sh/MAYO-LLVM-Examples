@@ -115,21 +115,25 @@ string strip_bad_asserts(const string &src) {
 static string find_initial_version(const string &src, const string &base,
                                    const string &finalVersion) {
   string current = finalVersion;
-  static const regex numRe(R"(c_(\d+)_)");
+  static const regex numRe(R"(c_(\d+)$)");
   while (true) {
     string target = current + "_" + base;
     size_t defPos = src.find("(= " + target);
     if (defPos == string::npos)
       return current;
-
+    // cout << "defPos = " << defPos << "\n";
+    // cout << src.substr(defPos - 100, 300) << "\n";
     size_t assertStart = src.rfind("(assert", defPos);
     if (assertStart == string::npos)
       return current;
+    // cout << "assertStart = " << assertStart << "\n";
 
     string head = src.substr(assertStart, defPos - assertStart);
     if (head.find("(and (=>") != string::npos)
       return current; // guarded -- this is the true initial version
-
+    // cout << "head = " << head << "\n";
+    // cout << "find = " << head.find("(and (=>") << "\n";
+    // cout << "npos = " << string::npos << "\n";
     int depth = 0;
     size_t end = string::npos;
     for (size_t i = assertStart; i < src.size(); i++) {
@@ -146,10 +150,19 @@ static string find_initial_version(const string &src, const string &base,
     string block = src.substr(assertStart, end - assertStart + 1);
 
     smatch m;
+    // cout << "current = '" << current << "'\n";
+    // cout << regex_search(current, m, numRe) << "\n";
     if (!regex_search(current, m, numRe))
       return current;
     int n = stoi(m[1].str());
-    string predName = "c_" + to_string(n - 1) + "_" + base;
+    string predName = "c_" + to_string(n - 1);
+    // cout << "=====================\n";
+    // cout << "Current : " << current << "\n";
+    // cout << "Target  : " << target << "\n";
+    // cout << "Pred    : " << predName << "\n";
+    // cout << "Block:\n";
+    // cout << block << "\n";
+    // cout << "=====================\n";
     if (block.find(predName) == string::npos)
       return current;
     current = predName;
@@ -187,18 +200,24 @@ int main(int argc, char **argv) {
       correct_src, GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT);
   INITIAL_VERSION_FAULTY = find_initial_version(faulty_src, GLOBAL_BASE_FAULTY,
                                                 FINAL_VERSION_FAULTY);
-
+  // cout << INITIAL_VERSION_CORRECT << INITIAL_VERSION_FAULTY << "\n"
   string c1 = write_suffixed(correct_src, "C1", fn_path);
   string f1 = write_suffixed(faulty_src, "F1", fn_path);
   string c2 = write_suffixed(correct_src, "C2", fn_path);
   string f2 = write_suffixed(faulty_src, "F2", fn_path);
 
   context ctx;
+  z3::set_param("verbose", "1");
+  // params p(ctx);
+  // p.set("timeout", 300000u);
+  tactic simp = z3::tactic(ctx, "simplify");
+  tactic eqs = z3::tactic(ctx, "solve-eqs");
+  tactic prop = z3::tactic(ctx, "propagate-values");
+  tactic core = z3::tactic(ctx, "smt");
+  tactic pipeline = simp & prop & eqs & core;
 
-  params p(ctx);
-  p.set("timeout", 300000u);
-
-  solver slv(ctx);
+  solver slv = pipeline.mk_solver();
+  // solver slv(ctx);
   // solver slv(ctx, "QF_AUFLIA");
 
   // slv.set(p);
@@ -271,7 +290,7 @@ int main(int argc, char **argv) {
     slv.add(select(initC1, addr) == vi);
     slv.add(select(initC2, addr) == vi);
     slv.add(vi == ctx.int_val(1));
-    //    slv.add(vi >= ctx.int_val(0));
+    // slv.add(vi >= ctx.int_val(0));
     // slv.add(vi < ctx.int_val(256));
   }
 
@@ -288,20 +307,25 @@ int main(int argc, char **argv) {
     slv.add(o2i >= ctx.int_val(0));
     slv.add(o2i < ctx.int_val(256));
     // if (i == 0) {
-    // inputDiffs.push_back(o1i != o2i);
+    inputDiffs.push_back(o1i != o2i);
     // } else {
-    slv.add(o1i != o2i);
+    // slv.add(o1i != o2i);
     // }
   }
-  // slv.add(mk_or(inputDiffs));
+  slv.add(mk_or(inputDiffs));
 
   // ---- Output 1 ----
   for (long long i = 0; i < OUTPUT_REGION.length; i++) {
     expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
     expr c1v = select(finC1, addr);
     expr f1v = select(finF1, addr);
-    // if (i == 0)
-    slv.add(c1v == f1v);
+    if (i == 0) {
+      slv.add(c1v == f1v);
+      // cout << "Added: " << (c1v == f1v) << endl;
+    }
+
+    // cout << "Constraint:\n";
+    // cout << (c1v == f1v) << endl;
     slv.add(c1v >= ctx.int_val(0));
     slv.add(c1v < ctx.int_val(256));
     slv.add(f1v >= ctx.int_val(0));
@@ -313,6 +337,8 @@ int main(int argc, char **argv) {
 
     expr c2v = select(finC2, addr);
     expr f2v = select(finF2, addr);
+    if (i == 0)
+      slv.add(c2v != f2v);
 
     slv.add(c2v >= ctx.int_val(0));
     slv.add(c2v < ctx.int_val(256));
@@ -347,22 +373,10 @@ int main(int argc, char **argv) {
   cout << "\nIndex [0] Address Expression:\n  " << addr_0 << "\n";
   cout << "Index [0] Array Select (Correct C2):\n  " << sel_C2_0 << "\n";
   cout << "Index [0] Array Select (Faulty F2):\n  " << sel_F2_0 << "\n";
-  // cout << "Checking divergence at output index [0] only...\n";
-
-  // slv.push();
-
-  // expr addr_0_check = ctx.int_val((int)(OUTPUT_REGION.offset + 0)) + sPtr;
-  // expr c2_val_0 = select(finC2, addr_0_check);
-  // expr f2_val_0 = select(finF2, addr_0_check);
-  // slv.add(c2_val_0 >= ctx.int_val(0));
-  // slv.add(c2_val_0 < ctx.int_val(256));
-  // slv.add(f2_val_0 >= ctx.int_val(0));
-  // slv.add(f2_val_0 < ctx.int_val(256));
-  // slv.add(c2_val_0 != f2_val_0);
-
-  // cout << "Checking Index [0] with expression: " << (c2_val_0 != f2_val_0)
-  //      << " ... " << flush;
-
+ 
+  cout << "================ SOLVER ================\n";
+  // cout << slv << endl;
+  cout << slv.assertions().size() << endl;
   check_result res = slv.check();
 
   if (res == sat) {
@@ -370,9 +384,27 @@ int main(int argc, char **argv) {
     cout << "\n======================================================\n";
     cout << "SAT — found divergence target at output index [0]\n";
     cout << "======================================================\n\n";
-
+    cout << slv.assertions().size() << endl;
     model m = slv.get_model();
+    // cout << "================ MODEL ================\n";
+
+    // cout << m << "\n";
+    expr_vector bad(ctx);
+
+    for (unsigned i = 0; i < slv.assertions().size(); i++) {
+      expr a = slv.assertions()[i];
+      expr v = m.eval(a, true);
+
+      if (!v.is_true()) {
+        cout << "FAILED ASSERTION:\n";
+        cout << a << endl;
+        cout << "evaluates to " << v << endl;
+        break;
+      }
+    }
+
     auto ev = [&](const expr &e) { return m.eval(e, true).simplify(); };
+   
 
     cout << "-- " << INPUT_SHARED.label << " (shared, both executions) --\n";
     for (long long i = 0; i < INPUT_SHARED.length; i++) {
@@ -395,8 +427,17 @@ int main(int argc, char **argv) {
     cout << "\n-- Output region, execution 1 --\n";
     for (long long i = 0; i < OUTPUT_REGION.length; i++) {
       expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
-      expr cv = ev(select(finC1, addr));
+      // expr cv = ev(select(finC1, addr));
+
+      expr cv = m.eval(select(finC1, addr), true);
+
+      // cout << cv << endl;
+      // cout << "is numeral = " << cv.is_numeral() << endl;
       expr fv = ev(select(finF1, addr));
+      // cout << "addr = " << ev(addr) << endl;
+      // cout << "pointer = " << ev(sPtr) << endl;
+      // cout << "i_9_s_correct_C1 = " << ev(ctx.int_const("i_9_s_correct_C1"))
+      //      << endl;
       cout << "  [" << i << "] correct=" << cv << " faulty=" << fv
            << (z3::eq(cv, fv) ? "" : "  <-- DIFFERS") << "\n";
     }
