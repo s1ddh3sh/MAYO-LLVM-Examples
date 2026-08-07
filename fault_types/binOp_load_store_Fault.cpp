@@ -1153,8 +1153,8 @@ int main(int argc, char **argv) {
   std::string bmcCmdCorrect = "../llvmbmc " + filename + funcName + ".ll" +
                               " --dump-solver-query "
                               "-f main --var-suffix correct ";
-  run_command(bmcCmdCorrect);
-  run_command("cp /tmp/test.smt2 " + filename + funcName + ".smt2");
+  // run_command(bmcCmdCorrect);
+  // run_command("cp /tmp/test.smt2 " + filename + funcName + ".smt2");
 
   // auto mod = parseIRFile("original.ll", err, ctx);
   // outs() << *funcModule;
@@ -1221,8 +1221,8 @@ int main(int argc, char **argv) {
                                " --smt-only "
 
                                "-f main --var-suffix faulty ";
-    run_command(bmcCmdFaulty);
-    run_command("cp /tmp/test.smt2 " + smt2File);
+    // run_command(bmcCmdFaulty);
+    // run_command("cp /tmp/test.smt2 " + smt2File);
 
   }
 
