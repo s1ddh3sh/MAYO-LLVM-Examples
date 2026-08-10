@@ -313,16 +313,23 @@ int main(int argc, char **argv) {
     // }
   }
   slv.add(mk_or(inputDiffs));
+  {
+    expr addr0 = ctx.int_val((int)INPUT_VARIED.offset) + oxPtr;
+    expr o1_0 = ctx.int_const("O1_0");
+    expr o2_0 = ctx.int_const("O2_0");
+    slv.add(o1_0 != o2_0);
+  }
 
   // ---- Output 1 ----
   for (long long i = 0; i < OUTPUT_REGION.length; i++) {
     expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
     expr c1v = select(finC1, addr);
     expr f1v = select(finF1, addr);
-    if (i == 0) {
-      slv.add(c1v == f1v);
-      // cout << "Added: " << (c1v == f1v) << endl;
-    }
+    // if (i == 0) {
+    slv.add(c1v == f1v);
+    // cout << c1v << "\n" << f1v << "\n";
+    // cout << "Added: " << (c1v == f1v) << endl;
+    // }
 
     // cout << "Constraint:\n";
     // cout << (c1v == f1v) << endl;
@@ -373,7 +380,7 @@ int main(int argc, char **argv) {
   cout << "\nIndex [0] Address Expression:\n  " << addr_0 << "\n";
   cout << "Index [0] Array Select (Correct C2):\n  " << sel_C2_0 << "\n";
   cout << "Index [0] Array Select (Faulty F2):\n  " << sel_F2_0 << "\n";
- 
+
   cout << "================ SOLVER ================\n";
   // cout << slv << endl;
   cout << slv.assertions().size() << endl;
@@ -381,9 +388,9 @@ int main(int argc, char **argv) {
 
   if (res == sat) {
     cout << "SAT!\n";
-    cout << "\n======================================================\n";
-    cout << "SAT — found divergence target at output index [0]\n";
-    cout << "======================================================\n\n";
+    // cout << "\n======================================================\n";
+    // cout << "SAT — found divergence target at output index [0]\n";
+    // cout << "======================================================\n\n";
     cout << slv.assertions().size() << endl;
     model m = slv.get_model();
     // cout << "================ MODEL ================\n";
@@ -404,7 +411,6 @@ int main(int argc, char **argv) {
     }
 
     auto ev = [&](const expr &e) { return m.eval(e, true).simplify(); };
-   
 
     cout << "-- " << INPUT_SHARED.label << " (shared, both executions) --\n";
     for (long long i = 0; i < INPUT_SHARED.length; i++) {
