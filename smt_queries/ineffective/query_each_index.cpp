@@ -188,7 +188,7 @@ void characterize_masking_index0(solver &slv, context &ctx, const expr &c1v,
   vector<int> unequal_values;
   vector<int> unknown_values;
 
-  for (int v = 0; v < 256; v++) {
+  for (int v = 0; v < 16; v++) {
     slv.push();
     slv.add(o1_0 == ctx.int_val(v));
     // slv.add(c1v == f1v);
@@ -220,18 +220,18 @@ void characterize_masking_index0(solver &slv, context &ctx, const expr &c1v,
           "\n  ";
   for (int v : equal_values)
     cout << v << " ";
-  cout << "\n(" << equal_values.size() << " / 256 values)\n";
+  cout << "\n(" << equal_values.size() << " / 16 values)\n";
 
   cout << "\n-- c1v == f1v UNSAT (provably never masks) for O1_0 = \n  ";
   for (int v : unequal_values)
     cout << v << " ";
-  cout << "\n(" << unequal_values.size() << " / 256 values)\n";
+  cout << "\n(" << unequal_values.size() << " / 16 values)\n";
 
   if (!unknown_values.empty()) {
     cout << "\n-- UNKNOWN/TIMEOUT for O1_0 = --\n  ";
     for (int v : unknown_values)
       cout << v << " ";
-    cout << "\n(" << unknown_values.size() << " / 256 values)\n";
+    cout << "\n(" << unknown_values.size() << " / 16 values)\n";
   }
 
   cout << "==========================================================="
@@ -359,7 +359,7 @@ int main(int argc, char **argv) {
     slv.add(select(initC2, addr) == vi);
     slv.add(vi == ctx.int_val(1));
     // slv.add(vi >= ctx.int_val(0));
-    // slv.add(vi < ctx.int_val(256));
+    // slv.add(vi < ctx.int_val(16));
   }
 
   // ---- Varied input setup ----
@@ -371,9 +371,9 @@ int main(int argc, char **argv) {
     slv.add(select(initC1, addr) == o1i);
     slv.add(select(initC2, addr) == o2i);
     slv.add(o1i >= ctx.int_val(0));
-    slv.add(o1i < ctx.int_val(256));
+    slv.add(o1i < ctx.int_val(16));
     slv.add(o2i >= ctx.int_val(0));
-    slv.add(o2i < ctx.int_val(256));
+    slv.add(o2i < ctx.int_val(16));
 
     // if (i != 0)
     //   inputDiffs.push_back(o1i != o2i);
@@ -388,8 +388,9 @@ int main(int argc, char **argv) {
   expr addr = ctx.int_val((int)(OUTPUT_REGION.offset)) + sPtr;
   expr c1v = select(finC1, addr);
   expr f1v = select(finF1, addr);
-  // slv.add(o1_0 == ctx.int_val(1));
-  // slv.add(c1v != f1v);
+
+  slv.add(o1_0 == ctx.int_val(0));
+  // slv.add(c1v == f1v);
   // {
   //   cout << c1v << "\n" << f1v << "\n";
   // }
@@ -437,90 +438,90 @@ int main(int argc, char **argv) {
   cout << "================ SOLVER ================\n";
   // cout << slv << endl;
   cout << slv.assertions().size() << endl;
-  // check_result res = slv.check();
+  check_result res = slv.check();
 
-  // if (res == sat) {
-  //   cout << "SAT!\n";
-  //   // cout << "\n======================================================\n";
-  //   // cout << "SAT — found divergence target at output index [0]\n";
-  //   // cout << "======================================================\n\n";
-  //   cout << slv.assertions().size() << endl;
-  //   model m = slv.get_model();
-  //   // cout << "================ MODEL ================\n";
+  if (res == sat) {
+    cout << "SAT!\n";
+    // cout << "\n======================================================\n";
+    // cout << "SAT — found divergence target at output index [0]\n";
+    // cout << "======================================================\n\n";
+    cout << slv.assertions().size() << endl;
+    model m = slv.get_model();
+    // cout << "================ MODEL ================\n";
 
-  //   // cout << m << "\n";
-  //   expr_vector bad(ctx);
+    // cout << m << "\n";
+    expr_vector bad(ctx);
 
-  //   for (unsigned i = 0; i < slv.assertions().size(); i++) {
-  //     expr a = slv.assertions()[i];
-  //     expr v = m.eval(a, true);
+    for (unsigned i = 0; i < slv.assertions().size(); i++) {
+      expr a = slv.assertions()[i];
+      expr v = m.eval(a, true);
 
-  //     if (!v.is_true()) {
-  //       cout << "FAILED ASSERTION:\n";
-  //       cout << a << endl;
-  //       cout << "evaluates to " << v << endl;
-  //       break;
-  //     }
-  //   }
+      if (!v.is_true()) {
+        cout << "FAILED ASSERTION:\n";
+        cout << a << endl;
+        cout << "evaluates to " << v << endl;
+        break;
+      }
+    }
 
-  //   auto ev = [&](const expr &e) { return m.eval(e, true).simplify(); };
+    auto ev = [&](const expr &e) { return m.eval(e, true).simplify(); };
 
-  //   cout << "-- " << INPUT_SHARED.label << " (shared, both executions) --\n";
-  //   for (long long i = 0; i < INPUT_SHARED.length; i++) {
-  //     expr vi = ctx.int_const(("V_" + to_string(i)).c_str());
-  //     cout << "  [" << i << "] " << ev(vi) << "\n";
-  //   }
+    cout << "-- " << INPUT_SHARED.label << " (shared, both executions) --\n";
+    for (long long i = 0; i < INPUT_SHARED.length; i++) {
+      expr vi = ctx.int_const(("V_" + to_string(i)).c_str());
+      cout << "  [" << i << "] " << ev(vi) << "\n";
+    }
 
-  //   cout << "\n-- " << INPUT_VARIED.label << " execution 1 --\n";
-  //   for (long long i = 0; i < INPUT_VARIED.length; i++) {
-  //     expr o1i = ctx.int_const(("O1_" + to_string(i)).c_str());
-  //     cout << "  [" << i << "] " << ev(o1i) << "\n";
-  //   }
+    cout << "\n-- " << INPUT_VARIED.label << " execution 1 --\n";
+    for (long long i = 0; i < INPUT_VARIED.length; i++) {
+      expr o1i = ctx.int_const(("O1_" + to_string(i)).c_str());
+      cout << "  [" << i << "] " << ev(o1i) << "\n";
+    }
 
-  //   cout << "\n-- " << INPUT_VARIED.label << " execution 2 --\n";
-  //   for (long long i = 0; i < INPUT_VARIED.length; i++) {
-  //     expr o2i = ctx.int_const(("O2_" + to_string(i)).c_str());
-  //     cout << "  [" << i << "] " << ev(o2i) << "\n";
-  //   }
+    cout << "\n-- " << INPUT_VARIED.label << " execution 2 --\n";
+    for (long long i = 0; i < INPUT_VARIED.length; i++) {
+      expr o2i = ctx.int_const(("O2_" + to_string(i)).c_str());
+      cout << "  [" << i << "] " << ev(o2i) << "\n";
+    }
 
-  //   cout << "\n-- Output region, execution 1 --\n";
-  //   for (long long i = 0; i < OUTPUT_REGION.length; i++) {
-  //     expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
-  //     // expr cv = ev(select(finC1, addr));
+    cout << "\n-- Output region, execution 1 --\n";
+    for (long long i = 0; i < OUTPUT_REGION.length; i++) {
+      expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
+      // expr cv = ev(select(finC1, addr));
 
-  //     expr cv = m.eval(select(finC1, addr), true);
+      expr cv = m.eval(select(finC1, addr), true);
 
-  //     // cout << cv << endl;
-  //     // cout << "is numeral = " << cv.is_numeral() << endl;
-  //     expr fv = ev(select(finF1, addr));
-  //     // cout << "addr = " << ev(addr) << endl;
-  //     // cout << "pointer = " << ev(sPtr) << endl;
-  //     // cout << "i_9_s_correct_C1 = " << ev(ctx.int_const("i_9_s_correct_C1"))
-  //     //      << endl;
-  //     cout << "  [" << i << "] correct=" << cv << " faulty=" << fv
-  //          << (z3::eq(cv, fv) ? "" : "  <-- DIFFERS") << "\n";
-  //   }
+      // cout << cv << endl;
+      // cout << "is numeral = " << cv.is_numeral() << endl;
+      expr fv = ev(select(finF1, addr));
+      // cout << "addr = " << ev(addr) << endl;
+      // cout << "pointer = " << ev(sPtr) << endl;
+      // cout << "i_9_s_correct_C1 = " << ev(ctx.int_const("i_9_s_correct_C1"))
+      //      << endl;
+      cout << "  [" << i << "] correct=" << cv << " faulty=" << fv
+           << (z3::eq(cv, fv) ? "" : "  <-- DIFFERS") << "\n";
+    }
 
-  //   cout << "\n-- Output region, execution 2 --\n";
-  //   for (long long i = 0; i < OUTPUT_REGION.length; i++) {
-  //     expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
-  //     expr cv = ev(select(finC2, addr));
-  //     expr fv = ev(select(finF2, addr));
-  //     cout << "  [" << i << "] correct=" << cv << " faulty=" << fv
-  //          << (z3::eq(cv, fv) ? "" : "  <-- DIFFERS") << "\n";
-  //   }
-  // } else if (res == unsat) {
-  //   cout << "UNSAT\n";
-  //   cout << "[!] No differential pair found where index [0] specifically "
-  //           "diverges,\n"
-  //        << "    given: same shared input, some differing varied input, and "
-  //           "full\n"
-  //        << "    masking at every output index in execution 1.\n";
-  // } else {
-  //   cout << "UNKNOWN / TIMEOUT\n";
-  // }
+    cout << "\n-- Output region, execution 2 --\n";
+    for (long long i = 0; i < OUTPUT_REGION.length; i++) {
+      expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
+      expr cv = ev(select(finC2, addr));
+      expr fv = ev(select(finF2, addr));
+      cout << "  [" << i << "] correct=" << cv << " faulty=" << fv
+           << (z3::eq(cv, fv) ? "" : "  <-- DIFFERS") << "\n";
+    }
+  } else if (res == unsat) {
+    cout << "UNSAT\n";
+    cout << "[!] No differential pair found where index [0] specifically "
+            "diverges,\n"
+         << "    given: same shared input, some differing varied input, and "
+            "full\n"
+         << "    masking at every output index in execution 1.\n";
+  } else {
+    cout << "UNKNOWN / TIMEOUT\n";
+  }
 
-  characterize_masking_index0(slv, ctx, c1v, f1v, o1_0);
+  // characterize_masking_index0(slv, ctx, c1v, f1v, o1_0);
 
   return 0;
 }
