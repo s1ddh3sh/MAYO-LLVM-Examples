@@ -6,6 +6,5 @@ P1_times_O P1_times_Vt P1P1t_times_O pqmayo_MAYO_1_ref_mayo_expand_sk pqmayo_MAY
 pqmayo_MAYO_1_ref_mayo_sign_signature sub_f
 
 Error :
-P1_times_O P1_times_Vt P1P1t_times_O 
-pqmayo_MAYO_1_ref_mayo_expand_sk pqmayo_MAYO_1_ref_mayo_keypair_compact
+pqmayo_MAYO_1_ref_mayo_expand_sk 
 pqmayo_MAYO_1_ref_mayo_sign_signature

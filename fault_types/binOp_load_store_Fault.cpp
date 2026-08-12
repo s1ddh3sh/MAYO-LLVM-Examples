@@ -216,9 +216,11 @@ public:
       PN->addIncoming(incomingVal, prevIterExit);
     }
 
-    for (BasicBlock *BB : origBlocks) {
-      BB->eraseFromParent();
-    }
+    // NOTE: Do NOT manually erase origBlocks here.
+    // The original loop blocks are now unreachable and will be safely removed
+    // by subsequent DCE passes (GlobalDCEPass, ADCEPass, DCEPass).
+    // Manually erasing them causes memory corruption because LLVM's internal
+    // data structures (like LoopInfo) still reference these blocks.
   }
 };
 
@@ -1185,7 +1187,7 @@ int main(int argc, char **argv) {
   for (auto &fe : faults) {
 
     auto cloned = CloneModule(*funcModule);
-    stripOutputAssertions(*cloned); 
+    stripOutputAssertions(*cloned);
     LoopAnalysisManager LAM;
     FunctionAnalysisManager FAM;
     CGSCCAnalysisManager CGAM;
@@ -1223,7 +1225,6 @@ int main(int argc, char **argv) {
                                "-f main --var-suffix faulty ";
     // run_command(bmcCmdFaulty);
     // run_command("cp /tmp/test.smt2 " + smt2File);
-
   }
 
   return 0;
