@@ -16,6 +16,22 @@ namespace fs = std::filesystem;
 // File-text utilities
 // =====================================================================
 
+static string json_arr(const vector<long long> &v) {
+  ostringstream oss;
+  oss << "[";
+  for (size_t i = 0; i < v.size(); i++) {
+    if (i)
+      oss << ",";
+    oss << v[i];
+  }
+  oss << "]";
+  return oss.str();
+}
+
+static long long eval_i64(model &m, const expr &e) {
+  return m.eval(e, true).simplify().get_numeral_int64();
+}
+
 string read_file(const string &filename) {
   ifstream ifs(filename);
   if (!ifs) {
@@ -206,7 +222,8 @@ void characterize_masking_index0(solver &slv, context &ctx, const expr &c1v,
         unequal_values.push_back(v);
       }
     } else if (res == unsat) {
-      cout << "  O1_0 = " << v << " -> UNSAT (unexpected, base "
+      cout << "  O1_0 = " << v
+           << " -> UNSAT (unexpected, base "
               "formula infeasible for this value)\n";
     } else {
       unknown_values.push_back(v);
@@ -510,6 +527,82 @@ int main(int argc, char **argv) {
       cout << "  [" << i << "] correct=" << cv << " faulty=" << fv
            << (z3::eq(cv, fv) ? "" : "  <-- DIFFERS") << "\n";
     }
+
+    // ---------------- witness JSON export ----------------
+    {
+      vector<long long> vdec_vals, ox1_vals, ox2_vals;
+      vector<long long> s1_correct, s1_faulty, s2_correct, s2_faulty;
+
+      for (long long i = 0; i < INPUT_SHARED.length; i++)
+        vdec_vals.push_back(
+            eval_i64(m, ctx.int_const(("V_" + to_string(i)).c_str())));
+
+      for (long long i = 0; i < INPUT_VARIED.length; i++) {
+        ox1_vals.push_back(
+            eval_i64(m, ctx.int_const(("O1_" + to_string(i)).c_str())));
+        ox2_vals.push_back(
+            eval_i64(m, ctx.int_const(("O2_" + to_string(i)).c_str())));
+      }
+
+      for (long long i = 0; i < OUTPUT_REGION.length; i++) {
+        expr addr = ctx.int_val((int)(OUTPUT_REGION.offset + i)) + sPtr;
+        s1_correct.push_back(eval_i64(m, select(finC1, addr)));
+        s1_faulty.push_back(eval_i64(m, select(finF1, addr)));
+        s2_correct.push_back(eval_i64(m, select(finC2, addr)));
+        s2_faulty.push_back(eval_i64(m, select(finF2, addr)));
+      }
+
+      string witness_path = fn_path + "witness.json";
+      ofstream wj(witness_path);
+      wj << "{\n";
+      wj << "  \"function\": \"" << fn << "\",\n";
+      wj << "  \"layout\": {\n";
+      wj << "    \"" << INPUT_SHARED.label
+         << "\": {\"role\": \"input\",  \"length\": " << INPUT_SHARED.length
+         << "},\n";
+      wj << "    \"" << INPUT_VARIED.label
+         << "\": {\"role\": \"input\",  \"length\": " << INPUT_VARIED.length
+         << "},\n";
+      wj << "    \"" << OUTPUT_REGION.label
+         << "\": {\"role\": \"output\", \"length\": " << OUTPUT_REGION.length
+         << "}\n";
+      wj << "  },\n";
+      wj << "  \"trials\": [\n";
+      wj << "    {\n";
+      wj << "      \"trial_id\": \"exec1_ineffective_witness\",\n";
+      wj << "      \"inputs\": {\n";
+      wj << "        \"" << INPUT_SHARED.label << "\": " << json_arr(vdec_vals)
+         << ",\n";
+      wj << "        \"" << INPUT_VARIED.label << "\": " << json_arr(ox1_vals)
+         << "\n";
+      wj << "      },\n";
+      wj << "      \"expected\": {\n";
+      wj << "        \"" << OUTPUT_REGION.label
+         << "_correct\": " << json_arr(s1_correct) << ",\n";
+      wj << "        \"" << OUTPUT_REGION.label
+         << "_faulty\": " << json_arr(s1_faulty) << "\n";
+      wj << "      }\n";
+      wj << "    },\n";
+      wj << "    {\n";
+      wj << "      \"trial_id\": \"exec2_divergence_witness\",\n";
+      wj << "      \"inputs\": {\n";
+      wj << "        \"" << INPUT_SHARED.label << "\": " << json_arr(vdec_vals)
+         << ",\n";
+      wj << "        \"" << INPUT_VARIED.label << "\": " << json_arr(ox2_vals)
+         << "\n";
+      wj << "      },\n";
+      wj << "      \"expected\": {\n";
+      wj << "        \"" << OUTPUT_REGION.label
+         << "_correct\": " << json_arr(s2_correct) << ",\n";
+      wj << "        \"" << OUTPUT_REGION.label
+         << "_faulty\": " << json_arr(s2_faulty) << "\n";
+      wj << "      }\n";
+      wj << "    }\n";
+      wj << "  ]\n";
+      wj << "}\n";
+      cout << "\n[+] witness exported to " << witness_path << "\n";
+    }
+
   } else if (res == unsat) {
     cout << "UNSAT\n";
     cout << "[!] No differential pair found where index [0] specifically "
