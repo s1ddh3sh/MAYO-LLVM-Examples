@@ -216,6 +216,9 @@ public:
       PN->addIncoming(incomingVal, prevIterExit);
     }
 
+    for (BasicBlock *BB : origBlocks) {
+      BB->eraseFromParent();
+    }
     // NOTE: Do NOT manually erase origBlocks here.
     // The original loop blocks are now unreachable and will be safely removed
     // by subsequent DCE passes (GlobalDCEPass, ADCEPass, DCEPass).

@@ -456,6 +456,27 @@ static FunctionSpec get_function_spec(const string &fn) {
   throw runtime_error("No FunctionSpec registered for '" + fn + "'");
 }
 
+// Peek at whether a file's final top-level assert is the degenerate
+// "(assert (not true))" (or any other shape find_output_assert can't
+// parse) form that results when a fault causes the ENTIRE function call
+// to be skipped and replaced by a compile-time constant (DirectFuncSkip
+// with a type-mismatched/null replacement), rather than an internal
+// instruction skip that leaves genuine symbolic computation behind. For
+// scalar-output functions there is no array to fall back on in that
+// case (see rewrite_output_assert), so such fault variants should be
+// skipped in favor of one that actually exercises the function's own
+// logic. Does not modify `src`.
+static bool has_degenerate_output_assert(const string &src) {
+  size_t pos = src.rfind("(assert");
+  if (pos == string::npos)
+    return true;
+  size_t end = match_paren(src, pos);
+  if (end == string::npos)
+    return true;
+  OutputAssertInfo info;
+  return !find_output_assert(src, pos, end, info);
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     cerr << "Usage: ./differential_query <fnName>\n";
@@ -465,20 +486,49 @@ int main(int argc, char **argv) {
   string fn_path = "../../results/" + fn + "/";
   string correct_path = fn_path + fn + ".smt2";
   string faulty_dir = fn_path + "loopOrFuncSkip/";
-  string faulty_path;
 
-  for (const auto &entry : fs::directory_iterator(faulty_dir)) {
-    if (entry.is_regular_file() && entry.path().extension() == ".smt2") {
-      faulty_path = entry.path().string();
-      break;
-    }
-  }
-  if (faulty_path.empty()) {
+  vector<string> faultyCandidates;
+  for (const auto &entry : fs::directory_iterator(faulty_dir))
+    if (entry.is_regular_file() && entry.path().extension() == ".smt2")
+      faultyCandidates.push_back(entry.path().string());
+  if (faultyCandidates.empty()) {
     cerr << "No .smt2 file found in " << faulty_dir << "\n";
     return 1;
   }
 
   FunctionSpec spec = get_function_spec(fn);
+
+  // For scalar-output functions, a fault variant whose entire call got
+  // replaced by a compile-time constant (see has_degenerate_output_assert)
+  // has no symbolic computation left to query -- skip past those and use
+  // the first variant that actually contains an internal fault. Buffer
+  // outputs never hit this problem (they never depend on the driver's
+  // own assert), so any candidate works for them.
+  string faulty_path;
+  if (spec.isScalarOutput) {
+    for (auto &cand : faultyCandidates) {
+      if (!has_degenerate_output_assert(read_file(cand))) {
+        faulty_path = cand;
+        break;
+      }
+      cerr << "[note] skipping faulty variant '" << cand
+           << "' -- its output check was fully constant-folded away "
+              "(likely the whole call was replaced by the fault, "
+              "leaving nothing symbolic to compare for a scalar "
+              "output).\n";
+    }
+    if (faulty_path.empty()) {
+      cerr << "[fatal] every faulty .smt2 for '" << fn
+           << "' has a degenerate, constant-folded output check; none "
+              "of them can be used for a scalar-output differential "
+              "query. Check whether any of these variants actually "
+              "fault *inside* the function rather than skipping the "
+              "call to it entirely.\n";
+      return 1;
+    }
+  } else {
+    faulty_path = faultyCandidates.front();
+  }
 
   // Route the output-assert handling based on output kind: only scalar
   // ("ret") outputs need the fragile parse-and-rewrite -- buffer outputs
@@ -497,8 +547,8 @@ int main(int argc, char **argv) {
     faulty_src = strip_bad_asserts(strip_last_assert(read_file(faulty_path)));
   }
 
-  static const string FINAL_VERSION_CORRECT = "c_93"; // TODO: derive, not hardcode
-  static const string FINAL_VERSION_FAULTY = "c_93";
+  static const string FINAL_VERSION_CORRECT = "c_10"; // TODO: derive, not hardcode
+  static const string FINAL_VERSION_FAULTY = "c_10";
   static const string GLOBAL_BASE_CORRECT = "Global_M_correct";
   static const string GLOBAL_BASE_FAULTY = "Global_M_faulty";
 
@@ -600,16 +650,16 @@ int main(int argc, char **argv) {
         expr addr = ctx.int_val((int)(a.offset + i)) + pb.pC1;
         expr o1i = ctx.int_const((a.name + "_1_" + to_string(i)).c_str());
         expr o2i = ctx.int_const((a.name + "_2_" + to_string(i)).c_str());
-        // if(i == 0){
-        //   slv.add(o1i != o2i);
-        //   slv.add(o1i == ctx.int_val(0));
-        // }
         slv.add(select(initC1, addr) == o1i);
         slv.add(select(initC2, addr) == o2i);
         slv.add(o1i >= ctx.int_val(0));
         slv.add(o1i < ctx.int_val(16));
         slv.add(o2i >= ctx.int_val(0));
         slv.add(o2i < ctx.int_val(16));
+        if(i == 0){
+          slv.add(o1i != o2i);
+          slv.add(o1i == ctx.int_val(0));
+        }
       }
     }
   }
@@ -663,8 +713,8 @@ int main(int argc, char **argv) {
 
   // Example differential condition (same intent as the original
   // ineffective_query): fault masked in trial 1, diverges in trial 2.
-  slv.add(c1v == f1v);
-  slv.add(c2v != f2v);
+  // slv.add(c1v == f1v);
+  // slv.add(c2v != f2v);
 
   cout << "================ SOLVER ================\n";
   cout << slv.assertions().size() << endl;

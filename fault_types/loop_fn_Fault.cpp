@@ -292,7 +292,9 @@ public:
 
       PN->addIncoming(incomingVal, prevIterExit);
     }
-
+    for (BasicBlock *BB : origBlocks) {
+      BB->eraseFromParent();
+    }
     // NOTE: Do NOT manually erase origBlocks here.
     // The original loop blocks are now unreachable and will be safely removed
     // by subsequent DCE passes (GlobalDCEPass, ADCEPass, DCEPass).
@@ -971,7 +973,9 @@ public:
 
       PN->addIncoming(incomingVal, prevIterExit);
     }
-
+    for (BasicBlock *BB : origBlocks) {
+      BB->eraseFromParent();
+    }
     // NOTE: Do NOT manually erase origBlocks here.
     // The original loop blocks are now unreachable and will be safely removed
     // by subsequent DCE passes (GlobalDCEPass, ADCEPass, DCEPass).
@@ -1346,7 +1350,7 @@ int main(int argc, char **argv) {
   std::string outFile;
   if (mode == LOOP_SKIP) {
     auto faultModule = CloneModule(*funcModule);
-    stripOutputAssertions(*faultModule);
+    // stripOutputAssertions(*faultModule);
     unsigned skipIter = 1;
     Function *faultFunc = faultModule->getFunction(funcName);
     if (faultFunc) {
@@ -1544,8 +1548,8 @@ int main(int argc, char **argv) {
                                " --dump-solver-query "
 
                                "-f main --var-suffix faulty ";
-    // run_command(bmcCmdFaulty);
-    // run_command("cp /tmp/test.smt2 ../loopFault.smt2");
+    run_command(bmcCmdFaulty);
+    run_command("cp /tmp/test.smt2 ../loopFault.smt2");
   } else {
     targetSmt2 = outFile;
     size_t dotPos = targetSmt2.find_last_of('.');
@@ -1553,11 +1557,11 @@ int main(int argc, char **argv) {
       targetSmt2.replace(dotPos, std::string::npos, ".smt2");
     }
     std::string bmcCmdFaulty = "../llvmbmc " + outFile +
-                               " --dump-solver-query "
+                               " --smt-only "
 
                                "-f main --var-suffix faulty ";
-    // run_command(bmcCmdFaulty);
-    // run_command("cp /tmp/test.smt2 " + targetSmt2);
+    run_command(bmcCmdFaulty);
+    run_command("cp /tmp/test.smt2 " + targetSmt2);
   }
 
   return 0;
