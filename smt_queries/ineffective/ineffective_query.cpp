@@ -1,6 +1,4 @@
 #include "z3++.h"
-#include <cctype>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -59,24 +57,6 @@ static size_t match_paren(const string &s, size_t open) {
     }
   }
   return string::npos;
-}
-
-// Parse the first S-expression (atom or parenthesized list) starting at
-// `start` (may have leading whitespace). Returns [begin, end) -- end is
-// one past the last character of the S-expr.
-static pair<size_t, size_t> first_sexpr(const string &s, size_t start) {
-  size_t i = start;
-  while (i < s.size() && isspace((unsigned char)s[i]))
-    i++;
-  size_t begin = i;
-  if (i < s.size() && s[i] == '(') {
-    size_t end = match_paren(s, i);
-    return {begin, end + 1};
-  }
-  while (i < s.size() && !isspace((unsigned char)s[i]) && s[i] != '(' &&
-         s[i] != ')')
-    i++;
-  return {begin, i};
 }
 
 string strip_bad_asserts(const string &src) {
@@ -149,169 +129,23 @@ static string find_initial_version(const string &src, const string &base,
   }
 }
 
-// =====================================================================
-// Output-assertion rewriting
-//
-// llvmbmc's driver always emits the final safety-check assert in one of
-// two textually-different but semantically-identical shapes:
-//
-//   Shape B (direct):
-//     (assert ... (not (or (not GUARD) (= EXPR CONST))) ...)
-//
-//   Shape A (let-bound):
-//     (assert (let ((a!1 (or (not GUARD) (= EXPR CONST)))) (not a!1)))
-//
-// Both encode: GUARD && (EXPR != CONST) -- i.e. "this path was taken and
-// the concrete testcase's expected output doesn't match", used to hunt
-// counterexamples against ONE specific baked-in CONST.
-//
-// For the differential query we don't want a specific CONST at all --
-// we want EXPR itself, gated by GUARD, bound to a fresh, stable symbol
-// so the solver stays free to explore all completions. So we rewrite
-// the whole thing to:
-//
-//     (=> GUARD (= __mbc_output_<tag> EXPR))
-//
-// which is definitionally exactly what the rest of the file already
-// does for every other SSA value (guarded implications along the live
-// path), and drop CONST entirely.
-// =====================================================================
-
-struct OutputAssertInfo {
-  string guard;
-  string expr;
-  bool viaLet = false;
-  string letName;
-  size_t replStart = 0, replEnd = 0;   // span of the "or (not ...) (= ...)" itself
-  size_t usageStart = 0, usageEnd = 0; // span of "(not <letName>)", if viaLet
-};
-
-static bool find_output_assert(const string &src, size_t searchFrom,
-                                size_t searchTo, OutputAssertInfo &out) {
-  size_t P = src.find("(or (not ", searchFrom);
-  if (P == string::npos || P >= searchTo)
-    return false;
-
-  size_t orEnd = match_paren(src, P);
-  if (orEnd == string::npos)
-    return false;
-
-  // GUARD: token right after "(or (not "
-  size_t guardStart = P + strlen("(or (not ");
-  size_t guardEnd = src.find(')', guardStart);
-  if (guardEnd == string::npos)
-    return false;
-  out.guard = src.substr(guardStart, guardEnd - guardStart);
-
-  // (= EXPR CONST): starts after guard's closing ')'
-  size_t eqOpen = src.find("(= ", guardEnd);
-  if (eqOpen == string::npos || eqOpen > orEnd)
-    return false;
-  size_t eqInnerStart = eqOpen + 3;
-  auto exprSpan = first_sexpr(src, eqInnerStart);
-  out.expr = src.substr(exprSpan.first, exprSpan.second - exprSpan.first);
-  // (CONST follows inside the (= ...) form; we intentionally discard it.)
-
-  // ---- Determine wrapping shape ----
-  size_t k = P;
-  while (k > 0 && isspace((unsigned char)src[k - 1]))
-    k--;
-
-  // Shape B: directly "(not " immediately before "(or (not ..."
-  if (k >= 5 && src.compare(k - 5, 5, "(not ") == 0) {
-    size_t notStart = k - 5;
-    size_t notEnd = match_paren(src, notStart);
-    if (notEnd != string::npos && notEnd > orEnd) {
-      out.viaLet = false;
-      out.replStart = notStart;
-      out.replEnd = notEnd + 1;
-      return true;
-    }
-  }
-
-  // Shape A: "or ..." is the value half of a let-binding pair
-  // "(<name> (or (not ...". `k` (computed above) already points just
-  // past the end of <name> -- whitespace before "(or" was already
-  // stripped -- so we scan backward from k for the name itself, then
-  // confirm it's preceded by the binding-pair's opening '('.
-  {
-    size_t nameEnd = k;
-    size_t nameStart = nameEnd;
-    while (nameStart > 0 && !isspace((unsigned char)src[nameStart - 1]) &&
-           src[nameStart - 1] != '(')
-      nameStart--;
-    if (nameStart > 0 && nameStart < nameEnd && src[nameStart - 1] == '(') {
-      string name = src.substr(nameStart, nameEnd - nameStart);
-      string usagePat = "(not " + name + ")";
-      size_t u = src.find(usagePat, orEnd);
-      if (u != string::npos) {
-        out.viaLet = true;
-        out.letName = name;
-        out.replStart = P;
-        out.replEnd = orEnd + 1;
-        out.usageStart = u;
-        out.usageEnd = u + usagePat.size();
-        return true;
-      }
-    }
-  }
-
-  return false;
-}
-
-// Rewrites the final top-level (assert ...) in `src` -- the output
-// safety-check emitted by the driver -- into a guarded definitional
-// equation for a fresh Int constant "i_0_mbc_output_<tag>", and prepends
-// its declaration. `tag` should be "correct" or "faulty" to match the
-// existing naming convention (so write_suffixed's per-trial renamer
-// picks it up like every other identifier in the file).
-static string rewrite_output_assert(const string &src, const string &tag) {
-  size_t pos = src.rfind("(assert");
-  if (pos == string::npos)
-    return src;
-  size_t end = match_paren(src, pos);
-  if (end == string::npos)
-    return src;
-
-  OutputAssertInfo info;
-  if (!find_output_assert(src, pos, end, info)) {
-    cerr << "[rewrite_output_assert] FATAL: could not locate the scalar "
-            "output safety-check pattern in this file. This function's "
-            "output was declared 'ret' (scalar) in its FunctionSpec, so "
-            "there is no array fallback -- refusing to continue with a "
-            "silently-broken output symbol.\n";
-    exit(1);
-  }
-
-  string outSym = "i_0_mbc_output_" + tag;
-  string replacement =
-      "(=> " + info.guard + " (= " + outSym + " " + info.expr + "))";
-
-  string result = src;
-  if (!info.viaLet) {
-    result.replace(info.replStart, info.replEnd - info.replStart, replacement);
-  } else {
-    // Apply the later edit first so the earlier offset stays valid.
-    result.replace(info.usageStart, info.usageEnd - info.usageStart,
-                    info.letName);
-    result.replace(info.replStart, info.replEnd - info.replStart, replacement);
-  }
-
-  string decl = "(declare-fun " + outSym + " () Int)\n";
-  return decl + result;
-}
-
 // Unconditionally deletes the last top-level (assert ...), regardless of
-// its content. Used for Buffer-typed outputs, where we never need to
-// parse this assert at all -- the true output value already lives at a
-// known, fixed address in the final Global_M array (see FunctionSpec's
-// OutputSpec), so this assert's only job is to get out of the way.
+// its content. This is llvmbmc's own final safety-check assert, and we
+// never need to parse it: buffer outputs read the true value straight
+// out of the final Global_M array (see FunctionSpec's outputIndexVar),
+// and scalar outputs read it via the __mbc_ret_anchor_<fn> volatile-store
+// anchor (see FunctionSpec's outputAnchorName) -- both survive
+// regardless of whatever shape this trailing assert takes.
 //
-// Crucially this is *not* conditional on recognizing a particular shape:
-// a fault can change control flow enough that llvmbmc constant-folds
-// this whole check down to something like "(assert (not true))" --
-// literally "assert false" -- and any fallback that leaves such a line
-// in place silently forces the entire model UNSAT. Always delete it.
+// That shape varies a lot and isn't worth trying to characterize: it can
+// be the driver's real GUARD/CONST comparison, something llvmbmc
+// constant-folded down to a literal boolean, or (when FUNC_SKIP mode's
+// stripOutputAssertions has already removed the driver's own assert
+// entirely) just llvmbmc's own generic "no safety property to check"
+// boilerplate. In every case it's noise we don't need, and leaving it in
+// place risks silently adding a hard, testcase-specific constraint (or
+// worse, an unconditional "assert false") to the solver. Always delete
+// it instead of trying to interpret it.
 static string strip_last_assert(const string &src) {
   size_t pos = src.rfind("(assert");
   if (pos == string::npos)
@@ -346,7 +180,7 @@ struct ArgSpec {
                         // llvmbmc.var name, not the prefixed/suffixed form
   long long offset = 0;
   long long length = 0;    // only meaningful for Buffer
-  long long fixedValue = 0; // only meaningful for role == FixedInput --
+  long long fixedValue = 11; // only meaningful for role == FixedInput --
                              // the concrete byte value every position in
                              // this region is pinned to (mirrors the old
                              // hardcoded "slv.add(vi == ctx.int_val(1))"
@@ -359,10 +193,12 @@ struct FunctionSpec {
   vector<ArgSpec> args;
 
   // Output description. Exactly one of the two forms applies:
-  //  - scalar (isScalarOutput = true): the value comes from the driver's
-  //    final safety-check assert, extracted via rewrite_output_assert.
-  //    Used for genuine return-value ("ret") outputs, where no memory
-  //    region holds the value.
+  //  - scalar (isScalarOutput = true): the value comes from a dedicated
+  //    volatile-store anchor global ("__mbc_ret_anchor_<fn>") that the
+  //    driver writes right after the call, independent of whether the
+  //    driver's own assert/comparison survives fault injection -- see
+  //    outputAnchorName. Used for genuine return-value ("ret") outputs,
+  //    where no memory region holds the value.
   //  - buffer (isScalarOutput = false): the value lives at a known,
   //    fixed address in Global_M, exactly like an input region. Used for
   //    both pure-output buffers ("s") and in-place input/output buffers
@@ -370,6 +206,13 @@ struct FunctionSpec {
   //    just select() the *final* array version instead of the initial
   //    one. Covers cases 2/3 from the original design discussion.
   bool isScalarOutput = true;
+  string outputAnchorName;    // Scalar only: e.g. "__mbc_ret_anchor_lincomb"
+                               // -- the base name of the volatile-store
+                               // anchor global (see createDynamicDriverFunction
+                               // in loop_fn_Fault.cpp). Resolved via
+                               // resolve_final_ssa_symbol, not
+                               // resolve_index_var, since it's reassigned
+                               // (not a fixed pointer).
   string outputIndexVar;   // Buffer only: llvmbmc.var base name
   long long outputOffset = 0; // Buffer only
   long long outputLength = 1; // Buffer only -- how many bytes of the
@@ -392,6 +235,9 @@ struct FunctionSpec {
 // (e.g. "Vdec") within a correct/faulty source, honoring the fact that
 // llvmbmc numbers these i_<N>_<name>_correct / i_<N>_<name>_faulty and N
 // varies per function. We don't know N ahead of time, so search for it.
+// Only safe for identifiers declared ONCE (pointers) -- see
+// resolve_final_ssa_symbol for values re-assigned along the way (e.g.
+// Global_M, or the scalar return-value anchor below).
 static string resolve_index_var(const string &src, const string &base,
                                  bool faulty) {
   string suffix = faulty ? "_faulty" : "_correct";
@@ -401,6 +247,35 @@ static string resolve_index_var(const string &src, const string &base,
     return m[0].str();
   throw runtime_error("Could not resolve index var for '" + base +
                        "' (looked for i_<N>_" + base + suffix + ")");
+}
+
+// Like resolve_index_var, but for identifiers that get re-declared at
+// multiple SSA versions as the value changes along the program's guarded
+// implications (e.g. "__mbc_ret_anchor_<fn>": i_2_..._correct is its
+// initial "= 0" declaration, i_55_..._correct is the final "= <the real
+// computed value>" one). Returns the occurrence with the highest numeric
+// version, which holds the value after every guarded assignment has had
+// a chance to apply -- the same role FINAL_VERSION_CORRECT/FAULTY play
+// for Global_M, just discovered dynamically instead of hardcoded.
+static string resolve_final_ssa_symbol(const string &src, const string &base,
+                                        bool faulty) {
+  string suffix = faulty ? "_faulty" : "_correct";
+  regex re("i_(\\d+)_" + base + suffix);
+  auto begin = sregex_iterator(src.begin(), src.end(), re);
+  auto end = sregex_iterator();
+  string best;
+  long bestN = -1;
+  for (auto it = begin; it != end; ++it) {
+    long n = stol((*it)[1].str());
+    if (n > bestN) {
+      bestN = n;
+      best = (*it)[0].str();
+    }
+  }
+  if (bestN < 0)
+    throw runtime_error("Could not resolve any SSA version for '" + base +
+                         "' (looked for i_<N>_" + base + suffix + ")");
+  return best;
 }
 
 // ---- Example hardcoded specs for the three functions seen so far ----
@@ -442,39 +317,21 @@ static FunctionSpec get_function_spec(const string &fn) {
     FunctionSpec spec;
     spec.fnName = "lincomb";
     spec.args = {
-        {"a_buf", ArgKind::Buffer, ArgRole::FixedInput, "a_buf", 0, 8},
+        {"a_buf", ArgKind::Buffer, ArgRole::FixedInput, "a_buf", 0, 8, 11},
         // "x"/"b" region intentionally omitted here -- its access pattern
         // isn't a flat contiguous region in this function (see the
         // add.ptr.iterN chain in the smt2); model it with whatever
         // offset/length llvmbmc reports once wired up.
     };
-    // lincomb returns its result by value -- no buffer holds it, so this
-    // is the one case that genuinely needs rewrite_output_assert.
+    // lincomb returns its result by value -- no buffer holds it, so we
+    // read it back via the volatile-store anchor the driver writes right
+    // after the call (see createDynamicDriverFunction), which survives
+    // regardless of whether the driver's own assert/comparison does.
     spec.isScalarOutput = true;
+    spec.outputAnchorName = "__mbc_ret_anchor_lincomb";
     return spec;
   }
   throw runtime_error("No FunctionSpec registered for '" + fn + "'");
-}
-
-// Peek at whether a file's final top-level assert is the degenerate
-// "(assert (not true))" (or any other shape find_output_assert can't
-// parse) form that results when a fault causes the ENTIRE function call
-// to be skipped and replaced by a compile-time constant (DirectFuncSkip
-// with a type-mismatched/null replacement), rather than an internal
-// instruction skip that leaves genuine symbolic computation behind. For
-// scalar-output functions there is no array to fall back on in that
-// case (see rewrite_output_assert), so such fault variants should be
-// skipped in favor of one that actually exercises the function's own
-// logic. Does not modify `src`.
-static bool has_degenerate_output_assert(const string &src) {
-  size_t pos = src.rfind("(assert");
-  if (pos == string::npos)
-    return true;
-  size_t end = match_paren(src, pos);
-  if (end == string::npos)
-    return true;
-  OutputAssertInfo info;
-  return !find_output_assert(src, pos, end, info);
 }
 
 int main(int argc, char **argv) {
@@ -495,57 +352,29 @@ int main(int argc, char **argv) {
     cerr << "No .smt2 file found in " << faulty_dir << "\n";
     return 1;
   }
+  // Any candidate works now: buffer outputs are read straight out of
+  // Global_M (never depend on the driver's assert), and scalar outputs
+  // are read via the __mbc_ret_anchor_<fn> volatile-store anchor, which
+  // is written unconditionally right after the call regardless of
+  // whether the driver's own comparison survives fault injection (it
+  // never does for FUNC_SKIP mode -- stripOutputAssertions runs
+  // unconditionally there, not just for whole-call-skip faults as
+  // originally assumed). So there's no more need to peek at each
+  // candidate's final assert and skip "degenerate" ones.
+  string faulty_path = faultyCandidates.front();
 
   FunctionSpec spec = get_function_spec(fn);
 
-  // For scalar-output functions, a fault variant whose entire call got
-  // replaced by a compile-time constant (see has_degenerate_output_assert)
-  // has no symbolic computation left to query -- skip past those and use
-  // the first variant that actually contains an internal fault. Buffer
-  // outputs never hit this problem (they never depend on the driver's
-  // own assert), so any candidate works for them.
-  string faulty_path;
-  if (spec.isScalarOutput) {
-    for (auto &cand : faultyCandidates) {
-      if (!has_degenerate_output_assert(read_file(cand))) {
-        faulty_path = cand;
-        break;
-      }
-      cerr << "[note] skipping faulty variant '" << cand
-           << "' -- its output check was fully constant-folded away "
-              "(likely the whole call was replaced by the fault, "
-              "leaving nothing symbolic to compare for a scalar "
-              "output).\n";
-    }
-    if (faulty_path.empty()) {
-      cerr << "[fatal] every faulty .smt2 for '" << fn
-           << "' has a degenerate, constant-folded output check; none "
-              "of them can be used for a scalar-output differential "
-              "query. Check whether any of these variants actually "
-              "fault *inside* the function rather than skipping the "
-              "call to it entirely.\n";
-      return 1;
-    }
-  } else {
-    faulty_path = faultyCandidates.front();
-  }
-
-  // Route the output-assert handling based on output kind: only scalar
-  // ("ret") outputs need the fragile parse-and-rewrite -- buffer outputs
-  // just get the trailing assert unconditionally deleted (regardless of
-  // whether the compiler folded it down to something degenerate like
-  // "assert false"), since the real output is read directly out of
-  // Global_M later via select().
-  string correct_src, faulty_src;
-  if (spec.isScalarOutput) {
-    correct_src = strip_bad_asserts(
-        rewrite_output_assert(read_file(correct_path), "correct"));
-    faulty_src = strip_bad_asserts(
-        rewrite_output_assert(read_file(faulty_path), "faulty"));
-  } else {
-    correct_src = strip_bad_asserts(strip_last_assert(read_file(correct_path)));
-    faulty_src = strip_bad_asserts(strip_last_assert(read_file(faulty_path)));
-  }
+  // The trailing assert is always just noise now -- for buffer outputs
+  // it never mattered, and for scalar outputs the anchor makes it
+  // irrelevant too (whether it's a real comparison, a constant-folded
+  // one, or llvmbmc's own "(assert (not true))" boilerplate for
+  // programs with no explicit safety property). Always strip it so it
+  // can never sneak in as a hard constraint.
+  string correct_src =
+      strip_bad_asserts(strip_last_assert(read_file(correct_path)));
+  string faulty_src =
+      strip_bad_asserts(strip_last_assert(read_file(faulty_path)));
 
   static const string FINAL_VERSION_CORRECT = "c_10"; // TODO: derive, not hardcode
   static const string FINAL_VERSION_FAULTY = "c_10";
@@ -656,8 +485,7 @@ int main(int argc, char **argv) {
         slv.add(o1i < ctx.int_val(16));
         slv.add(o2i >= ctx.int_val(0));
         slv.add(o2i < ctx.int_val(16));
-        if(i == 0){
-          slv.add(o1i != o2i);
+        if(i==0){
           slv.add(o1i == ctx.int_val(0));
         }
       }
@@ -669,11 +497,16 @@ int main(int argc, char **argv) {
   expr c2v = ctx.int_val(0), f2v = ctx.int_val(0);
 
   if (spec.isScalarOutput) {
-    // "ret" case: the guarded scalar produced by rewrite_output_assert().
-    c1v = ctx.int_const("i_0_mbc_output_correct_C1");
-    f1v = ctx.int_const("i_0_mbc_output_faulty_F1");
-    c2v = ctx.int_const("i_0_mbc_output_correct_C2");
-    f2v = ctx.int_const("i_0_mbc_output_faulty_F2");
+    // "ret" case: read back via the volatile-store anchor -- resolve
+    // its FINAL SSA version (it's reassigned along the guarded chain
+    // just like Global_M is, so the first regex match would give the
+    // initial "= 0" declaration, not the real value).
+    string anchC = resolve_final_ssa_symbol(correct_src, spec.outputAnchorName, false);
+    string anchF = resolve_final_ssa_symbol(faulty_src, spec.outputAnchorName, true);
+    c1v = ctx.int_const((anchC + "_C1").c_str());
+    f1v = ctx.int_const((anchF + "_F1").c_str());
+    c2v = ctx.int_const((anchC + "_C2").c_str());
+    f2v = ctx.int_const((anchF + "_F2").c_str());
   } else {
     // Buffer case: read directly from the final Global_M version, at
     // the output's own (possibly in-place-aliased) pointer + offset --
@@ -713,8 +546,8 @@ int main(int argc, char **argv) {
 
   // Example differential condition (same intent as the original
   // ineffective_query): fault masked in trial 1, diverges in trial 2.
-  // slv.add(c1v == f1v);
-  // slv.add(c2v != f2v);
+  slv.add(c1v == f1v);
+  slv.add(c2v != f2v);
 
   cout << "================ SOLVER ================\n";
   cout << slv.assertions().size() << endl;

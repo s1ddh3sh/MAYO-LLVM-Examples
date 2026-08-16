@@ -520,7 +520,18 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
 
   CallInst *callI = builder.CreateCall(TargetF, callArgs);
   callI->setCallingConv(TargetF->getCallingConv());
-
+  if (!TargetF->getReturnType()->isVoidTy() &&
+      TargetF->getReturnType()->isIntegerTy()) {
+    Type *retTy = TargetF->getReturnType();
+    std::string anchorName = "__mbc_ret_anchor_" + TargetF->getName().str();
+    GlobalVariable *anchor = ExtractedM.getGlobalVariable(anchorName);
+    if (!anchor) {
+      anchor = new GlobalVariable(ExtractedM, retTy, /*isConstant=*/false,
+                                  GlobalValue::ExternalLinkage,
+                                  Constant::getNullValue(retTy), anchorName);
+    }
+    builder.CreateStore(callI, anchor, /*isVolatile=*/true);
+  }
   // Output assertion
   if (jsonHas(testcase, "output")) {
     const JsonValue &outVal = jsonGet(testcase, "output");
@@ -1158,8 +1169,8 @@ int main(int argc, char **argv) {
   std::string bmcCmdCorrect = "../llvmbmc " + filename + funcName + ".ll" +
                               " --dump-solver-query "
                               "-f main --var-suffix correct ";
-  // run_command(bmcCmdCorrect);
-  // run_command("cp /tmp/test.smt2 " + filename + funcName + ".smt2");
+  run_command(bmcCmdCorrect);
+  run_command("cp /tmp/test.smt2 " + filename + funcName + ".smt2");
 
   // auto mod = parseIRFile("original.ll", err, ctx);
   // outs() << *funcModule;
@@ -1226,8 +1237,8 @@ int main(int argc, char **argv) {
                                " --smt-only "
 
                                "-f main --var-suffix faulty ";
-    // run_command(bmcCmdFaulty);
-    // run_command("cp /tmp/test.smt2 " + smt2File);
+    run_command(bmcCmdFaulty);
+    run_command("cp /tmp/test.smt2 " + smt2File);
   }
 
   return 0;

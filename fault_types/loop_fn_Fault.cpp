@@ -643,7 +643,18 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
 
   CallInst *callI = builder.CreateCall(TargetF, callArgs);
   callI->setCallingConv(TargetF->getCallingConv());
-
+  if (!TargetF->getReturnType()->isVoidTy() &&
+      TargetF->getReturnType()->isIntegerTy()) {
+    Type *retTy = TargetF->getReturnType();
+    std::string anchorName = "__mbc_ret_anchor_" + TargetF->getName().str();
+    GlobalVariable *anchor = ExtractedM.getGlobalVariable(anchorName);
+    if (!anchor) {
+      anchor = new GlobalVariable(ExtractedM, retTy, /*isConstant=*/false,
+                                  GlobalValue::ExternalLinkage,
+                                  Constant::getNullValue(retTy), anchorName);
+    }
+    builder.CreateStore(callI, anchor, /*isVolatile=*/true);
+  }
   // Output assertion
   if (jsonHas(testcase, "output")) {
     const JsonValue &outVal = jsonGet(testcase, "output");
@@ -1536,13 +1547,13 @@ int main(int argc, char **argv) {
   std::string bmcCmdCorrect = "../llvmbmc " + original +
                               " --dump-solver-query "
                               "-f main --var-suffix correct ";
-  // run_command(bmcCmdCorrect);
+  run_command(bmcCmdCorrect);
   std::string targetSmt2 = original;
   size_t dotPos = targetSmt2.find_last_of('.');
   if (dotPos != std::string::npos) {
     targetSmt2.replace(dotPos, std::string::npos, ".smt2");
   }
-  // run_command("cp /tmp/test.smt2 " + targetSmt2);
+  run_command("cp /tmp/test.smt2 " + targetSmt2);
   if (mode == LOOP_SKIP) {
     std::string bmcCmdFaulty = "../llvmbmc " + faultyFile + "_loopskip.ll" +
                                " --dump-solver-query "
@@ -1557,7 +1568,7 @@ int main(int argc, char **argv) {
       targetSmt2.replace(dotPos, std::string::npos, ".smt2");
     }
     std::string bmcCmdFaulty = "../llvmbmc " + outFile +
-                               " --smt-only "
+                               " --dump-solver-query "
 
                                "-f main --var-suffix faulty ";
     run_command(bmcCmdFaulty);
