@@ -300,7 +300,8 @@ static FunctionSpec get_function_spec(const string &fn) {
     FunctionSpec spec;
     spec.fnName = "m_vec_add";
     spec.args = {
-        {"pk", ArgKind::Buffer, ArgRole::FixedInput, "pk", 0, 8},
+        {"pk", ArgKind::Buffer, ArgRole::VariedInput, "pk", 0, 8},
+        {"accumulator", ArgKind::Buffer, ArgRole::FixedInput, "pk", 0, 8},
     };
     // "accumulator" is in-place input+output: seed it as a FixedInput
     // (add it to `args` too, with its own offset, if the experiment
@@ -318,6 +319,7 @@ static FunctionSpec get_function_spec(const string &fn) {
     spec.fnName = "lincomb";
     spec.args = {
         {"a_buf", ArgKind::Buffer, ArgRole::FixedInput, "a_buf", 0, 8, 11},
+        {"x", ArgKind::Buffer, ArgRole::VariedInput, "x", 0, 8},
         // "x"/"b" region intentionally omitted here -- its access pattern
         // isn't a flat contiguous region in this function (see the
         // add.ptr.iterN chain in the smt2); model it with whatever
@@ -546,8 +548,8 @@ int main(int argc, char **argv) {
 
   // Example differential condition (same intent as the original
   // ineffective_query): fault masked in trial 1, diverges in trial 2.
-  slv.add(c1v == f1v);
-  slv.add(c2v != f2v);
+  // slv.add(c1v == f1v);
+  // slv.add(c2v != f2v);
 
   cout << "================ SOLVER ================\n";
   cout << slv.assertions().size() << endl;
