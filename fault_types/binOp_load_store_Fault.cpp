@@ -40,6 +40,9 @@
 #include <memory>
 
 using namespace llvm;
+static constexpr unsigned kMaxUnrollTripCount = 10000;
+
+
 void run_command(const std::string &cmd) {
   int ret = system(cmd.c_str());
   if (ret != 0) {
@@ -79,7 +82,11 @@ public:
         errs() << "cannot determine trip count\n";
         continue;
       }
-
+      if (tripCount > kMaxUnrollTripCount) {
+        errs() << "Loop trip count " << tripCount << " exceeds max ("
+               << kMaxUnrollTripCount << "); skipping unroll for this loop\n";
+        continue;
+      }
       errs() << "Loop trip count: " << tripCount << "\n";
       addLabelNUnroll(F, L, LI, SE, tripCount);
     }
@@ -1169,14 +1176,12 @@ int main(int argc, char **argv) {
   std::string bmcCmdCorrect = "../llvmbmc " + filename + funcName + ".ll" +
                               " --dump-solver-query "
                               "-f main --var-suffix correct ";
-  run_command(bmcCmdCorrect);
-  run_command("cp /tmp/test.smt2 " + filename + funcName + ".smt2");
+  // run_command(bmcCmdCorrect);
+  // run_command("cp /tmp/test.smt2 " + filename + funcName + ".smt2");
 
   // auto mod = parseIRFile("original.ll", err, ctx);
   // outs() << *funcModule;
 
-  // run_command("../../llvmbmc ../original.ll --dump-solver-query -f main");
-  // run_command("cp /tmp/test.smt2 ../correct.smt2");
   struct FaultEntry {
     FaultModel model;
     const char *name;
@@ -1237,8 +1242,8 @@ int main(int argc, char **argv) {
                                " --smt-only "
 
                                "-f main --var-suffix faulty ";
-    run_command(bmcCmdFaulty);
-    run_command("cp /tmp/test.smt2 " + smt2File);
+    // run_command(bmcCmdFaulty);
+    // run_command("cp /tmp/test.smt2 " + smt2File);
   }
 
   return 0;

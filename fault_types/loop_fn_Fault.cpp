@@ -53,6 +53,7 @@
 #include "json_parser.h"
 
 using namespace llvm;
+static constexpr unsigned kMaxUnrollTripCount = 10000;
 
 enum FaultMode { LOOP_SKIP = 0, FUNC_SKIP = 1 };
 static Instruction *getInstByIndex(Function &F, unsigned targetInst) {
@@ -124,7 +125,11 @@ public:
         errs() << "cannot determine trip count\n";
         continue;
       }
-
+      if (tripCount > kMaxUnrollTripCount) {
+        errs() << "Loop trip count " << tripCount << " exceeds max ("
+               << kMaxUnrollTripCount << "); skipping unroll for this loop\n";
+        continue;
+      }
       errs() << "Loop trip count: " << tripCount << "\n";
       addLabelNUnrollWithFuncSkip(F, L, LI, SE, tripCount);
     }
@@ -839,7 +844,11 @@ public:
         errs() << "cannot determine trip count\n";
         continue;
       }
-
+      if (tripCount > kMaxUnrollTripCount) {
+        errs() << "Loop trip count " << tripCount << " exceeds max ("
+               << kMaxUnrollTripCount << "); skipping unroll for this loop\n";
+        continue;
+      }
       errs() << "Loop trip count: " << tripCount << "\n";
       addLabelNUnroll(F, L, LI, SE, tripCount);
     }
@@ -1547,20 +1556,20 @@ int main(int argc, char **argv) {
   std::string bmcCmdCorrect = "../llvmbmc " + original +
                               " --dump-solver-query "
                               "-f main --var-suffix correct ";
-  run_command(bmcCmdCorrect);
+  // run_command(bmcCmdCorrect);
   std::string targetSmt2 = original;
   size_t dotPos = targetSmt2.find_last_of('.');
   if (dotPos != std::string::npos) {
     targetSmt2.replace(dotPos, std::string::npos, ".smt2");
   }
-  run_command("cp /tmp/test.smt2 " + targetSmt2);
+  // run_command("cp /tmp/test.smt2 " + targetSmt2);
   if (mode == LOOP_SKIP) {
     std::string bmcCmdFaulty = "../llvmbmc " + faultyFile + "_loopskip.ll" +
                                " --dump-solver-query "
 
                                "-f main --var-suffix faulty ";
-    run_command(bmcCmdFaulty);
-    run_command("cp /tmp/test.smt2 ../loopFault.smt2");
+    // run_command(bmcCmdFaulty);
+    // run_command("cp /tmp/test.smt2 ../loopFault.smt2");
   } else {
     targetSmt2 = outFile;
     size_t dotPos = targetSmt2.find_last_of('.');
@@ -1571,8 +1580,8 @@ int main(int argc, char **argv) {
                                " --dump-solver-query "
 
                                "-f main --var-suffix faulty ";
-    run_command(bmcCmdFaulty);
-    run_command("cp /tmp/test.smt2 " + targetSmt2);
+    // run_command(bmcCmdFaulty);
+    // run_command("cp /tmp/test.smt2 " + targetSmt2);
   }
 
   return 0;
