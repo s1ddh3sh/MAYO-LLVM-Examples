@@ -65,7 +65,7 @@ string strip_bad_asserts(const string &src) {
 }
 
 string write_suffixed(const string &content, const string &tag,
-                       const string &outDir) {
+                      const string &outDir) {
   string result = content;
   regex ident(R"(\b((?:i|c|b)_\d+_[A-Za-z0-9_.]+)\b)");
   result = regex_replace(result, ident, "$1_" + tag);
@@ -90,14 +90,14 @@ static string swap_correct_faulty(const string &name) {
 }
 
 static void assert_no_overlap(solver &slv, context &ctx, expr startA,
-                               long long lenA, expr startB, long long lenB) {
+                              long long lenA, expr startB, long long lenB) {
   expr endA = startA + ctx.int_val((int)lenA);
   expr endB = startB + ctx.int_val((int)lenB);
   slv.add(endA <= startB || endB <= startA);
 }
 
 static string find_initial_version(const string &src, const string &base,
-                                    const string &finalVersion) {
+                                   const string &finalVersion) {
   string current = finalVersion;
   static const regex numRe(R"(c_(\d+)$)");
   while (true) {
@@ -135,17 +135,8 @@ static string find_initial_version(const string &src, const string &base,
 // out of the final Global_M array (see FunctionSpec's outputIndexVar),
 // and scalar outputs read it via the __mbc_ret_anchor_<fn> volatile-store
 // anchor (see FunctionSpec's outputAnchorName) -- both survive
-// regardless of whatever shape this trailing assert takes.
-//
-// That shape varies a lot and isn't worth trying to characterize: it can
-// be the driver's real GUARD/CONST comparison, something llvmbmc
-// constant-folded down to a literal boolean, or (when FUNC_SKIP mode's
-// stripOutputAssertions has already removed the driver's own assert
-// entirely) just llvmbmc's own generic "no safety property to check"
-// boilerplate. In every case it's noise we don't need, and leaving it in
-// place risks silently adding a hard, testcase-specific constraint (or
-// worse, an unconditional "assert false") to the solver. Always delete
-// it instead of trying to interpret it.
+// regardless of whatever shape this trailing assert takes. Always
+// delete it instead of trying to interpret it.
 static string strip_last_assert(const string &src) {
   size_t pos = src.rfind("(assert");
   if (pos == string::npos)
@@ -159,106 +150,64 @@ static string strip_last_assert(const string &src) {
 // =====================================================================
 // Function I/O specification (data-driven replacement for the old
 // hardcoded INPUT_SHARED / INPUT_VARIED / OUTPUT_REGION constants).
-//
-// Offsets/index-vars are still hardcoded per-function for now, per your
-// note -- the intent is that these come straight out of llvmbmc's own
-// layout output once that's wired up. Nothing else in this file should
-// need to change when that happens; only get_function_spec().
 // =====================================================================
 
 enum class ArgKind { Scalar, Buffer };
-enum class ArgRole { FixedInput, VariedInput }; // buffers may combine with
-                                                 // "also read as output" --
-                                                 // see isOutputAliased below
+enum class ArgRole { FixedInput, VariedInput };
 
 struct ArgSpec {
-  string name;         // human-readable / debug label
+  string name; // human-readable / debug label
   ArgKind kind;
   ArgRole role;
-  string indexVar;     // e.g. "Vdec" -> becomes i_2_Vdec_correct/_faulty in
-                        // the smt2; pass the *base* identifier, i.e. the
-                        // llvmbmc.var name, not the prefixed/suffixed form
+  string indexVar; // e.g. "Vdec" -> becomes i_2_Vdec_correct/_faulty in
+                   // the smt2; pass the *base* identifier
   long long offset = 0;
-  long long length = 0;    // only meaningful for Buffer
-  long long fixedValue = 11; // only meaningful for role == FixedInput --
-                             // the concrete byte value every position in
-                             // this region is pinned to (mirrors the old
-                             // hardcoded "slv.add(vi == ctx.int_val(1))"
-                             // for Vdec). Extend to a per-index vector if
-                             // a function needs non-uniform fixed bytes.
+  long long length = 0;      // only meaningful for Buffer
+  long long fixedValue = 11; // only meaningful for role == FixedInput
 };
 
 struct FunctionSpec {
   string fnName;
   vector<ArgSpec> args;
 
-  // Output description. Exactly one of the two forms applies:
-  //  - scalar (isScalarOutput = true): the value comes from a dedicated
-  //    volatile-store anchor global ("__mbc_ret_anchor_<fn>") that the
-  //    driver writes right after the call, independent of whether the
-  //    driver's own assert/comparison survives fault injection -- see
-  //    outputAnchorName. Used for genuine return-value ("ret") outputs,
-  //    where no memory region holds the value.
-  //  - buffer (isScalarOutput = false): the value lives at a known,
-  //    fixed address in Global_M, exactly like an input region. Used for
-  //    both pure-output buffers ("s") and in-place input/output buffers
-  //    ("acc") -- the two are identical from this point on, since we
-  //    just select() the *final* array version instead of the initial
-  //    one. Covers cases 2/3 from the original design discussion.
   bool isScalarOutput = true;
   string outputAnchorName;    // Scalar only: e.g. "__mbc_ret_anchor_lincomb"
-                               // -- the base name of the volatile-store
-                               // anchor global (see createDynamicDriverFunction
-                               // in loop_fn_Fault.cpp). Resolved via
-                               // resolve_final_ssa_symbol, not
-                               // resolve_index_var, since it's reassigned
-                               // (not a fixed pointer).
-  string outputIndexVar;   // Buffer only: llvmbmc.var base name
+  string outputIndexVar;      // Buffer only: llvmbmc.var base name
   long long outputOffset = 0; // Buffer only
-  long long outputLength = 1; // Buffer only -- how many bytes of the
-                               // output region to report in witness.json.
-                               // NOTE: this is independent of what the
-                               // differential predicate itself checks --
-                               // that's still just byte 0 (matching the
-                               // driver's own out_actual_i8), same as the
-                               // original script. Bump this to the full
-                               // buffer size to get the whole array back
-                               // in the witness, exactly like the
-                               // original OUTPUT_REGION.length did.
-  string outputLabel;      // JSON key used in witness.json, e.g. "s" or
-                            // "acc". Defaults to outputIndexVar for
-                            // buffer outputs, or "ret" for scalar ones,
-                            // if left blank -- see witness export below.
+  long long outputLength = 1; // Buffer only -- bytes reported in witness.json
+  string outputLabel;         // JSON key used in witness.json
 };
 
-// Locate the declared SMT identifier for a given llvmbmc.var base name
-// (e.g. "Vdec") within a correct/faulty source, honoring the fact that
-// llvmbmc numbers these i_<N>_<name>_correct / i_<N>_<name>_faulty and N
-// varies per function. We don't know N ahead of time, so search for it.
-// Only safe for identifiers declared ONCE (pointers) -- see
-// resolve_final_ssa_symbol for values re-assigned along the way (e.g.
-// Global_M, or the scalar return-value anchor below).
+// A Buffer arg's pointer, pinned equal across correct/faulty and across
+// trials 1/2, plus its region-start address (used for non-overlap).
+struct PinnedBuffer {
+  const ArgSpec *spec;
+  expr pC1, pF1, pC2, pF2;
+  expr startC1;
+};
+
+// Locate the declared SMT identifier for a given llvmbmc.var base name,
+// honoring the fact that llvmbmc numbers these i_<N>_<name>_correct /
+// i_<N>_<name>_faulty and N varies per function. Only safe for
+// identifiers declared ONCE (pointers) -- see resolve_final_ssa_symbol
+// for values re-assigned along the way.
 static string resolve_index_var(const string &src, const string &base,
-                                 bool faulty) {
+                                bool faulty) {
   string suffix = faulty ? "_faulty" : "_correct";
   regex re("i_(\\d+)_" + base + suffix);
   smatch m;
   if (regex_search(src, m, re))
     return m[0].str();
   throw runtime_error("Could not resolve index var for '" + base +
-                       "' (looked for i_<N>_" + base + suffix + ")");
+                      "' (looked for i_<N>_" + base + suffix + ")");
 }
 
-// Like resolve_index_var, but for identifiers that get re-declared at
-// multiple SSA versions as the value changes along the program's guarded
-// implications (e.g. "__mbc_ret_anchor_<fn>": i_2_..._correct is its
-// initial "= 0" declaration, i_55_..._correct is the final "= <the real
-// computed value>" one). Returns the occurrence with the highest numeric
-// version, which holds the value after every guarded assignment has had
-// a chance to apply -- the same role FINAL_VERSION_CORRECT/FAULTY play
-// for Global_M, just discovered dynamically instead of hardcoded.
+// Like resolve_index_var, but for identifiers re-declared at multiple
+// SSA versions (e.g. "__mbc_ret_anchor_<fn>"). Returns the occurrence
+// with the highest numeric version -- the value after every guarded
+// assignment has had a chance to apply.
 static string resolve_final_ssa_symbol(const string &src, const string &base,
-                                        bool faulty) {
+                                       bool faulty) {
   string suffix = faulty ? "_faulty" : "_correct";
   regex re("i_(\\d+)_" + base + suffix);
   auto begin = sregex_iterator(src.begin(), src.end(), re);
@@ -274,7 +223,7 @@ static string resolve_final_ssa_symbol(const string &src, const string &base,
   }
   if (bestN < 0)
     throw runtime_error("Could not resolve any SSA version for '" + base +
-                         "' (looked for i_<N>_" + base + suffix + ")");
+                        "' (looked for i_<N>_" + base + suffix + ")");
   return best;
 }
 
@@ -287,13 +236,10 @@ static FunctionSpec get_function_spec(const string &fn) {
         {"Vdec", ArgKind::Buffer, ArgRole::FixedInput, "Vdec", 780, 78, 1},
         {"Ox", ArgKind::Buffer, ArgRole::VariedInput, "Ox", 780, 78},
     };
-    // "s" is a pure output buffer -- read via select() at the final
-    // Global_M version, not via the (fragile, sometimes constant-folded
-    // away) final safety-check assert.
     spec.isScalarOutput = false;
     spec.outputIndexVar = "s";
     spec.outputOffset = 858;
-    spec.outputLength = 78; // full "s" buffer (78 bytes), for witness.json
+    spec.outputLength = 78;
     return spec;
   }
   if (fn == "m_vec_add") {
@@ -303,15 +249,10 @@ static FunctionSpec get_function_spec(const string &fn) {
         {"pk", ArgKind::Buffer, ArgRole::VariedInput, "pk", 0, 8},
         {"accumulator", ArgKind::Buffer, ArgRole::FixedInput, "pk", 0, 8},
     };
-    // "accumulator" is in-place input+output: seed it as a FixedInput
-    // (add it to `args` too, with its own offset, if the experiment
-    // needs to constrain its starting value) and also read it back here
-    // as the output -- both point at the same buffer, just at different
-    // Global_M versions (init vs final).
     spec.isScalarOutput = false;
     spec.outputIndexVar = "accumulator";
     spec.outputOffset = 18705;
-    spec.outputLength = 1; // driver only checks out_actual_i8
+    spec.outputLength = 1;
     return spec;
   }
   if (fn == "lincomb") {
@@ -320,20 +261,215 @@ static FunctionSpec get_function_spec(const string &fn) {
     spec.args = {
         {"a_buf", ArgKind::Buffer, ArgRole::FixedInput, "a_buf", 0, 8, 11},
         {"x", ArgKind::Buffer, ArgRole::VariedInput, "x", 0, 8},
-        // "x"/"b" region intentionally omitted here -- its access pattern
-        // isn't a flat contiguous region in this function (see the
-        // add.ptr.iterN chain in the smt2); model it with whatever
-        // offset/length llvmbmc reports once wired up.
     };
-    // lincomb returns its result by value -- no buffer holds it, so we
-    // read it back via the volatile-store anchor the driver writes right
-    // after the call (see createDynamicDriverFunction), which survives
-    // regardless of whether the driver's own assert/comparison does.
     spec.isScalarOutput = true;
     spec.outputAnchorName = "__mbc_ret_anchor_lincomb";
     return spec;
   }
   throw runtime_error("No FunctionSpec registered for '" + fn + "'");
+}
+
+// =====================================================================
+// Sweep: try every value 0..15 for `sweepVar` (byte 0 of the first
+// VariedInput), checking satisfiability separately for each. This
+// trades one hard existential search (which Z3 struggles with through
+// the int2bv/bv2int/Array chain) for 16 cheap, fully case-split checks
+// -- each hands the solver a concrete substitution instead of asking it
+// to find one. Treat each SAT result as a confirmed witness for that
+// specific value, not as evidence the solver searched and found it
+// unaided.
+//
+// Prints a summary of which values were SAT, and writes a single
+// combined witness.json covering every SAT value found.
+// =====================================================================
+static void run_sweep(context &ctx, solver &slv, const expr &sweepVar,
+                      const FunctionSpec &spec, vector<PinnedBuffer> &buffers,
+                      const expr &c1v, const expr &f1v, const expr &c2v,
+                      const expr &f2v, const string &fn, const string &fn_path,
+                      const string &correct_src, const string &faulty_src,
+                      const string &GLOBAL_BASE_CORRECT,
+                      const string &GLOBAL_BASE_FAULTY,
+                      const string &FINAL_VERSION_CORRECT,
+                      const string &FINAL_VERSION_FAULTY, z3::sort &arr_sort) {
+  struct FixedVals {
+    string name;
+    vector<long long> vals;
+  };
+  struct VariedVals {
+    string name;
+    vector<long long> v1, v2;
+  };
+
+  vector<int> satValues;
+  vector<int> unsatValues;
+  ostringstream trialsJson;
+  bool firstTrial = true;
+
+  for (int v = 0; v < 16; v++) {
+    slv.push();
+    slv.add(sweepVar == ctx.int_val(v));
+
+    cout << "\n================ value " << v << " ================\n";
+    check_result res = slv.check();
+
+    if (res == sat) {
+      satValues.push_back(v);
+      model m = slv.get_model();
+      auto ev = [&](const expr &e) { return m.eval(e, true).simplify(); };
+
+      cout << "  -> SAT\n";
+      cout << "  correct[1] = " << ev(c1v) << "  faulty[1] = " << ev(f1v)
+           << "\n";
+      cout << "  correct[2] = " << ev(c2v) << "  faulty[2] = " << ev(f2v)
+           << "\n";
+
+      // ---- collect input/output values for this value's witness entry ----
+      vector<FixedVals> fixedInputs;
+      vector<VariedVals> variedInputs;
+      for (auto &pb : buffers) {
+        const ArgSpec &a = *pb.spec;
+        if (a.role == ArgRole::FixedInput) {
+          FixedVals fv{a.name, {}};
+          for (long long i = 0; i < a.length; i++)
+            fv.vals.push_back(eval_i64(
+                m, ctx.int_const((a.name + "_" + to_string(i)).c_str())));
+          fixedInputs.push_back(fv);
+        } else {
+          VariedVals vv{a.name, {}, {}};
+          for (long long i = 0; i < a.length; i++) {
+            vv.v1.push_back(eval_i64(
+                m, ctx.int_const((a.name + "_1_" + to_string(i)).c_str())));
+            vv.v2.push_back(eval_i64(
+                m, ctx.int_const((a.name + "_2_" + to_string(i)).c_str())));
+          }
+          variedInputs.push_back(vv);
+        }
+      }
+
+      vector<long long> out1_correct, out1_faulty, out2_correct, out2_faulty;
+      if (spec.isScalarOutput) {
+        out1_correct.push_back(eval_i64(m, c1v));
+        out1_faulty.push_back(eval_i64(m, f1v));
+        out2_correct.push_back(eval_i64(m, c2v));
+        out2_faulty.push_back(eval_i64(m, f2v));
+      } else {
+        string ovC = resolve_index_var(correct_src, spec.outputIndexVar, false);
+        string ovF = resolve_index_var(faulty_src, spec.outputIndexVar, true);
+        expr outPtrC1 = ctx.int_const((ovC + "_C1").c_str());
+        expr outPtrF1 = ctx.int_const((ovF + "_F1").c_str());
+        expr outPtrC2 = ctx.int_const((ovC + "_C2").c_str());
+        expr outPtrF2 = ctx.int_const((ovF + "_F2").c_str());
+        auto final_arr2 = [&](const string &base, const string &finVer,
+                              const string &tag) {
+          return ctx.constant((finVer + "_" + base + "_" + tag).c_str(),
+                              arr_sort);
+        };
+        expr finC1b =
+            final_arr2(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C1");
+        expr finF1b =
+            final_arr2(GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY, "F1");
+        expr finC2b =
+            final_arr2(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C2");
+        expr finF2b =
+            final_arr2(GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY, "F2");
+        for (long long i = 0; i < spec.outputLength; i++) {
+          expr aC1 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrC1;
+          expr aF1 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrF1;
+          expr aC2 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrC2;
+          expr aF2 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrF2;
+          out1_correct.push_back(eval_i64(m, select(finC1b, aC1)));
+          out1_faulty.push_back(eval_i64(m, select(finF1b, aF1)));
+          out2_correct.push_back(eval_i64(m, select(finC2b, aC2)));
+          out2_faulty.push_back(eval_i64(m, select(finF2b, aF2)));
+        }
+      }
+
+      string outLabel = !spec.outputLabel.empty() ? spec.outputLabel
+                        : spec.isScalarOutput     ? "ret"
+                                                  : spec.outputIndexVar;
+
+      // ---- append this value's entry to the combined witness JSON ----
+      auto writeInputsObj =
+          [&](std::function<vector<long long>(VariedVals &)> pick) {
+            trialsJson << "        \"inputs\": {\n";
+            bool ifirst = true;
+            for (auto &fv : fixedInputs) {
+              trialsJson << (ifirst ? "          " : ",\n          ") << "\""
+                         << fv.name << "\": " << json_arr(fv.vals);
+              ifirst = false;
+            }
+            for (auto &vv : variedInputs) {
+              trialsJson << (ifirst ? "          " : ",\n          ") << "\""
+                         << vv.name << "\": " << json_arr(pick(vv));
+              ifirst = false;
+            }
+            trialsJson << "\n        }";
+          };
+
+      trialsJson << (firstTrial ? "" : ",\n") << "    {\n";
+      trialsJson << "      \"sweep_value\": " << v << ",\n";
+      trialsJson << "      \"exec1_ineffective\": {\n";
+      writeInputsObj([](VariedVals &vv) { return vv.v1; });
+      trialsJson << ",\n";
+      trialsJson << "        \"expected\": {\n";
+      trialsJson << "          \"" << outLabel
+                 << "_correct\": " << json_arr(out1_correct) << ",\n";
+      trialsJson << "          \"" << outLabel
+                 << "_faulty\": " << json_arr(out1_faulty) << "\n";
+      trialsJson << "        }\n";
+      trialsJson << "      },\n";
+      trialsJson << "      \"exec2\": {\n";
+      writeInputsObj([](VariedVals &vv) { return vv.v2; });
+      trialsJson << ",\n";
+      trialsJson << "        \"expected\": {\n";
+      trialsJson << "          \"" << outLabel
+                 << "_correct\": " << json_arr(out2_correct) << ",\n";
+      trialsJson << "          \"" << outLabel
+                 << "_faulty\": " << json_arr(out2_faulty) << "\n";
+      trialsJson << "        }\n";
+      trialsJson << "      }\n";
+      trialsJson << "    }";
+      firstTrial = false;
+
+    } else if (res == unsat) {
+      unsatValues.push_back(v);
+      cout << "  -> UNSAT\n";
+    } else {
+      unsatValues.push_back(v);
+      cout << "  -> UNKNOWN / TIMEOUT\n";
+    }
+
+    slv.pop();
+  }
+
+  // ---- final summary ----
+  cout << "\n================ SWEEP SUMMARY ================\n";
+  if (satValues.empty()) {
+    cout << "No value 0..15 was SAT for '" << fn << "'.\n";
+    return;
+  }
+  cout << "SAT for values:";
+  for (int v : satValues)
+    cout << " " << v;
+  cout << "\n";
+
+  cout << "UNSAT for values:";
+  for (int v : unsatValues)
+    cout << " " << v;
+  cout << "\n";
+
+  string witness_path = fn_path + "witness.json";
+  ofstream wj(witness_path);
+  wj << "{\n";
+  wj << "  \"function\": \"" << fn << "\",\n";
+  wj << "  \"sat_values\": "
+     << json_arr(vector<long long>(satValues.begin(), satValues.end()))
+     << ",\n";
+  wj << "  \"trials\": [\n";
+  wj << trialsJson.str() << "\n";
+  wj << "  ]\n";
+  wj << "}\n";
+  cout << "[+] witness exported to " << witness_path << "\n";
 }
 
 int main(int argc, char **argv) {
@@ -354,39 +490,25 @@ int main(int argc, char **argv) {
     cerr << "No .smt2 file found in " << faulty_dir << "\n";
     return 1;
   }
-  // Any candidate works now: buffer outputs are read straight out of
-  // Global_M (never depend on the driver's assert), and scalar outputs
-  // are read via the __mbc_ret_anchor_<fn> volatile-store anchor, which
-  // is written unconditionally right after the call regardless of
-  // whether the driver's own comparison survives fault injection (it
-  // never does for FUNC_SKIP mode -- stripOutputAssertions runs
-  // unconditionally there, not just for whole-call-skip faults as
-  // originally assumed). So there's no more need to peek at each
-  // candidate's final assert and skip "degenerate" ones.
   string faulty_path = faultyCandidates.front();
 
   FunctionSpec spec = get_function_spec(fn);
 
-  // The trailing assert is always just noise now -- for buffer outputs
-  // it never mattered, and for scalar outputs the anchor makes it
-  // irrelevant too (whether it's a real comparison, a constant-folded
-  // one, or llvmbmc's own "(assert (not true))" boilerplate for
-  // programs with no explicit safety property). Always strip it so it
-  // can never sneak in as a hard constraint.
   string correct_src =
       strip_bad_asserts(strip_last_assert(read_file(correct_path)));
   string faulty_src =
       strip_bad_asserts(strip_last_assert(read_file(faulty_path)));
 
-  static const string FINAL_VERSION_CORRECT = "c_93"; // TODO: derive, not hardcode
+  static const string FINAL_VERSION_CORRECT =
+      "c_93"; // TODO: derive, not hardcode
   static const string FINAL_VERSION_FAULTY = "c_93";
   static const string GLOBAL_BASE_CORRECT = "Global_M_correct";
   static const string GLOBAL_BASE_FAULTY = "Global_M_faulty";
 
-  string INITIAL_VERSION_CORRECT =
-      find_initial_version(correct_src, GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT);
-  string INITIAL_VERSION_FAULTY =
-      find_initial_version(faulty_src, GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY);
+  string INITIAL_VERSION_CORRECT = find_initial_version(
+      correct_src, GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT);
+  string INITIAL_VERSION_FAULTY = find_initial_version(
+      faulty_src, GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY);
 
   string c1 = write_suffixed(correct_src, "C1", fn_path);
   string f1 = write_suffixed(faulty_src, "F1", fn_path);
@@ -401,20 +523,26 @@ int main(int argc, char **argv) {
   tactic pipeline = simp & prop & eqs & core;
 
   solver slv = pipeline.mk_solver();
-
+  params p(ctx);
+  p.set("timeout", 5000u);
+  slv.set(p);
   expr_vector C1 = ctx.parse_file(c1.c_str());
   expr_vector F1 = ctx.parse_file(f1.c_str());
   expr_vector C2 = ctx.parse_file(c2.c_str());
   expr_vector F2 = ctx.parse_file(f2.c_str());
-  for (expr e : C1) slv.add(e);
-  for (expr e : F1) slv.add(e);
-  for (expr e : C2) slv.add(e);
-  for (expr e : F2) slv.add(e);
+  for (expr e : C1)
+    slv.add(e);
+  for (expr e : F1)
+    slv.add(e);
+  for (expr e : C2)
+    slv.add(e);
+  for (expr e : F2)
+    slv.add(e);
 
   z3::sort arr_sort = ctx.array_sort(ctx.int_sort(), ctx.int_sort());
 
   auto init_arr = [&](const string &base, const string &initVer,
-                       const string &tag) {
+                      const string &tag) {
     return ctx.constant((initVer + "_" + base + "_" + tag).c_str(), arr_sort);
   };
 
@@ -428,11 +556,6 @@ int main(int argc, char **argv) {
 
   // ---- Pin each Buffer arg's pointer equal across correct/faulty and
   //      across trials 1/2, exactly as the old pin_pointer() did ----
-  struct PinnedBuffer {
-    const ArgSpec *spec;
-    expr pC1, pF1, pC2, pF2;   // pointer values
-    expr startC1;              // offset + pointer, used for non-overlap
-  };
   vector<PinnedBuffer> buffers;
 
   for (auto &a : spec.args) {
@@ -455,13 +578,17 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < buffers.size(); i++)
     for (size_t j = i + 1; j < buffers.size(); j++)
       assert_no_overlap(slv, ctx, buffers[i].startC1, buffers[i].spec->length,
-                         buffers[j].startC1, buffers[j].spec->length);
+                        buffers[j].startC1, buffers[j].spec->length);
 
   // ---- Seed input values per role ----
-  expr_vector inputDiffs(ctx);
+  // sweepVar/haveSweepVar: byte 0 of the FIRST VariedInput arg's trial-1
+  // symbol (e.g. "Ox_1_0" for mat_add), captured here so run_sweep() can
+  // iterate it over 0..15 instead of leaving it fully free.
+  expr sweepVar = ctx.int_val(0);
+  bool haveSweepVar = false;
+
   for (auto &pb : buffers) {
     const ArgSpec &a = *pb.spec;
-    expr startC1 = pb.startC1;
 
     if (a.role == ArgRole::FixedInput) {
       for (long long i = 0; i < a.length; i++) {
@@ -469,12 +596,7 @@ int main(int argc, char **argv) {
         expr vi = ctx.int_const((a.name + "_" + to_string(i)).c_str());
         slv.add(select(initC1, addr) == vi);
         slv.add(select(initC2, addr) == vi);
-        slv.add(vi == ctx.int_val((int)a.fixedValue)); // was missing --
-        // this is what pins e.g. Vdec's bytes to 1, matching the original
-        // hardcoded behavior. Without it every FixedInput byte is a free
-        // variable, which silently changes what the query is actually
-        // asking (usually toward trivial SAT, not UNSAT -- see note below
-        // on why the *other* bug was the one that flipped this to UNSAT).
+        slv.add(vi == ctx.int_val((int)a.fixedValue));
       }
     } else { // VariedInput
       for (long long i = 0; i < a.length; i++) {
@@ -487,8 +609,9 @@ int main(int argc, char **argv) {
         slv.add(o1i < ctx.int_val(16));
         slv.add(o2i >= ctx.int_val(0));
         slv.add(o2i < ctx.int_val(16));
-        if(i==0){
-          slv.add(o1i == ctx.int_val(0));
+        if (i == 0 && !haveSweepVar) {
+          sweepVar = o1i;
+          haveSweepVar = true;
         }
       }
     }
@@ -499,35 +622,27 @@ int main(int argc, char **argv) {
   expr c2v = ctx.int_val(0), f2v = ctx.int_val(0);
 
   if (spec.isScalarOutput) {
-    // "ret" case: read back via the volatile-store anchor -- resolve
-    // its FINAL SSA version (it's reassigned along the guarded chain
-    // just like Global_M is, so the first regex match would give the
-    // initial "= 0" declaration, not the real value).
-    string anchC = resolve_final_ssa_symbol(correct_src, spec.outputAnchorName, false);
-    string anchF = resolve_final_ssa_symbol(faulty_src, spec.outputAnchorName, true);
+    string anchC =
+        resolve_final_ssa_symbol(correct_src, spec.outputAnchorName, false);
+    string anchF =
+        resolve_final_ssa_symbol(faulty_src, spec.outputAnchorName, true);
     c1v = ctx.int_const((anchC + "_C1").c_str());
     f1v = ctx.int_const((anchF + "_F1").c_str());
     c2v = ctx.int_const((anchC + "_C2").c_str());
     f2v = ctx.int_const((anchF + "_F2").c_str());
   } else {
-    // Buffer case: read directly from the final Global_M version, at
-    // the output's own (possibly in-place-aliased) pointer + offset --
-    // exactly like the original OUTPUT_REGION handling, just data-driven
-    // off FunctionSpec instead of a hardcoded ArrayRegion constant.
     string ovC = resolve_index_var(correct_src, spec.outputIndexVar, false);
     string ovF = resolve_index_var(faulty_src, spec.outputIndexVar, true);
     expr outPtrC1 = ctx.int_const((ovC + "_C1").c_str());
     expr outPtrF1 = ctx.int_const((ovF + "_F1").c_str());
     expr outPtrC2 = ctx.int_const((ovC + "_C2").c_str());
     expr outPtrF2 = ctx.int_const((ovF + "_F2").c_str());
-    // Same buffer must resolve to the same pointer across trials, same
-    // as every other pinned buffer above.
     slv.add(outPtrC1 == outPtrF1);
     slv.add(outPtrC1 == outPtrC2);
     slv.add(outPtrC1 == outPtrF2);
 
     auto final_arr = [&](const string &base, const string &finVer,
-                          const string &tag) {
+                         const string &tag) {
       return ctx.constant((finVer + "_" + base + "_" + tag).c_str(), arr_sort);
     };
     expr finC1 = final_arr(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C1");
@@ -553,190 +668,18 @@ int main(int argc, char **argv) {
 
   cout << "================ SOLVER ================\n";
   cout << slv.assertions().size() << endl;
-  check_result res = slv.check();
 
-  if (res == sat) {
-    cout << "SAT!\n";
-    model m = slv.get_model();
-    auto ev = [&](const expr &e) { return m.eval(e, true).simplify(); };
-
-    cout << "-- Output values --\n";
-    cout << "  correct[1] = " << ev(c1v) << "  faulty[1] = " << ev(f1v) << "\n";
-    cout << "  correct[2] = " << ev(c2v) << "  faulty[2] = " << ev(f2v) << "\n";
-
-    for (auto &pb : buffers) {
-      const ArgSpec &a = *pb.spec;
-      cout << "\n-- " << a.name << " (role="
-           << (a.role == ArgRole::FixedInput ? "fixed" : "varied") << ") --\n";
-      if (a.role == ArgRole::FixedInput) {
-        for (long long i = 0; i < a.length; i++) {
-          expr vi = ctx.int_const((a.name + "_" + to_string(i)).c_str());
-          cout << "  [" << i << "] " << ev(vi) << "\n";
-        }
-      } else {
-        for (long long i = 0; i < a.length; i++) {
-          expr o1i = ctx.int_const((a.name + "_1_" + to_string(i)).c_str());
-          expr o2i = ctx.int_const((a.name + "_2_" + to_string(i)).c_str());
-          cout << "  [" << i << "] trial1=" << ev(o1i)
-               << " trial2=" << ev(o2i) << "\n";
-        }
-      }
-    }
-
-    // ---------------- witness JSON export ----------------
-    // Generalized replacement for the original script's hardcoded
-    // Vdec/Ox/s witness block: walks whatever ArgSpecs and output kind
-    // this FunctionSpec declares, rather than assuming exactly one
-    // fixed input, one varied input, and one buffer output.
-    {
-      struct FixedVals {
-        string name;
-        vector<long long> vals;
-      };
-      struct VariedVals {
-        string name;
-        vector<long long> v1, v2;
-      };
-      vector<FixedVals> fixedInputs;
-      vector<VariedVals> variedInputs;
-
-      for (auto &pb : buffers) {
-        const ArgSpec &a = *pb.spec;
-        if (a.role == ArgRole::FixedInput) {
-          FixedVals fv{a.name, {}};
-          for (long long i = 0; i < a.length; i++)
-            fv.vals.push_back(
-                eval_i64(m, ctx.int_const((a.name + "_" + to_string(i)).c_str())));
-          fixedInputs.push_back(fv);
-        } else {
-          VariedVals vv{a.name, {}, {}};
-          for (long long i = 0; i < a.length; i++) {
-            vv.v1.push_back(eval_i64(
-                m, ctx.int_const((a.name + "_1_" + to_string(i)).c_str())));
-            vv.v2.push_back(eval_i64(
-                m, ctx.int_const((a.name + "_2_" + to_string(i)).c_str())));
-          }
-          variedInputs.push_back(vv);
-        }
-      }
-
-      // Output values per trial. For scalar ("ret") output this is a
-      // single-element list; for buffer output it's outputLength bytes
-      // starting at the known offset -- note c1v/f1v/c2v/f2v above only
-      // ever captured ONE byte of that region (matching what the
-      // driver's own out_actual_i8 checked), so for outputLength > 1 we
-      // re-derive the same addressing here to walk every byte.
-      vector<long long> out1_correct, out1_faulty, out2_correct, out2_faulty;
-      if (spec.isScalarOutput) {
-        out1_correct.push_back(eval_i64(m, c1v));
-        out1_faulty.push_back(eval_i64(m, f1v));
-        out2_correct.push_back(eval_i64(m, c2v));
-        out2_faulty.push_back(eval_i64(m, f2v));
-      } else {
-        string ovC = resolve_index_var(correct_src, spec.outputIndexVar, false);
-        string ovF = resolve_index_var(faulty_src, spec.outputIndexVar, true);
-        expr outPtrC1 = ctx.int_const((ovC + "_C1").c_str());
-        expr outPtrF1 = ctx.int_const((ovF + "_F1").c_str());
-        expr outPtrC2 = ctx.int_const((ovC + "_C2").c_str());
-        expr outPtrF2 = ctx.int_const((ovF + "_F2").c_str());
-        auto final_arr2 = [&](const string &base, const string &finVer,
-                               const string &tag) {
-          return ctx.constant((finVer + "_" + base + "_" + tag).c_str(),
-                               arr_sort);
-        };
-        expr finC1b = final_arr2(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C1");
-        expr finF1b = final_arr2(GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY, "F1");
-        expr finC2b = final_arr2(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C2");
-        expr finF2b = final_arr2(GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY, "F2");
-        for (long long i = 0; i < spec.outputLength; i++) {
-          expr aC1 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrC1;
-          expr aF1 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrF1;
-          expr aC2 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrC2;
-          expr aF2 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrF2;
-          out1_correct.push_back(eval_i64(m, select(finC1b, aC1)));
-          out1_faulty.push_back(eval_i64(m, select(finF1b, aF1)));
-          out2_correct.push_back(eval_i64(m, select(finC2b, aC2)));
-          out2_faulty.push_back(eval_i64(m, select(finF2b, aF2)));
-        }
-      }
-
-      // Label used for the output's JSON key(s), e.g. "s_correct" /
-      // "s_faulty" for mat_add, matching the original script's naming.
-      string outLabel = !spec.outputLabel.empty() ? spec.outputLabel
-                         : spec.isScalarOutput      ? "ret"
-                                                     : spec.outputIndexVar;
-
-      string witness_path = fn_path + "witness.json";
-      ofstream wj(witness_path);
-      wj << "{\n";
-      wj << "  \"function\": \"" << fn << "\",\n";
-      wj << "  \"layout\": {\n";
-
-      bool lfirst = true;
-      for (auto &fv : fixedInputs) {
-        wj << (lfirst ? "    " : ",\n    ") << "\"" << fv.name
-           << "\": {\"role\": \"input\", \"length\": " << fv.vals.size() << "}";
-        lfirst = false;
-      }
-      for (auto &vv : variedInputs) {
-        wj << (lfirst ? "    " : ",\n    ") << "\"" << vv.name
-           << "\": {\"role\": \"input\", \"length\": " << vv.v1.size() << "}";
-        lfirst = false;
-      }
-      wj << (lfirst ? "    " : ",\n    ") << "\"" << outLabel
-         << "\": {\"role\": \"output\", \"length\": "
-         << (spec.isScalarOutput ? 1 : spec.outputLength) << "}\n";
-      wj << "  },\n";
-      wj << "  \"trials\": [\n";
-
-      auto write_trial = [&](const string &trialId,
-                              std::function<vector<long long>(VariedVals &)> pick,
-                              vector<long long> &outCorrect,
-                              vector<long long> &outFaulty) {
-        wj << "    {\n";
-        wj << "      \"trial_id\": \"" << trialId << "\",\n";
-        wj << "      \"inputs\": {\n";
-        bool ifirst = true;
-        for (auto &fv : fixedInputs) {
-          wj << (ifirst ? "        " : ",\n        ") << "\"" << fv.name
-             << "\": " << json_arr(fv.vals);
-          ifirst = false;
-        }
-        for (auto &vv : variedInputs) {
-          wj << (ifirst ? "        " : ",\n        ") << "\"" << vv.name
-             << "\": " << json_arr(pick(vv));
-          ifirst = false;
-        }
-        wj << "\n      },\n";
-        wj << "      \"expected\": {\n";
-        wj << "        \"" << outLabel
-           << "_correct\": " << json_arr(outCorrect) << ",\n";
-        wj << "        \"" << outLabel
-           << "_faulty\": " << json_arr(outFaulty) << "\n";
-        wj << "      }\n";
-        wj << "    }";
-      };
-
-      write_trial(
-          "exec1_ineffective", [](VariedVals &vv) { return vv.v1; },
-          out1_correct, out1_faulty);
-      wj << ",\n";
-      write_trial(
-          "exec2", [](VariedVals &vv) { return vv.v2; },
-          out2_correct, out2_faulty);
-      wj << "\n";
-
-      wj << "  ]\n";
-      wj << "}\n";
-      cout << "\n[+] witness exported to " << witness_path << "\n";
-    }
-  } else if (res == unsat) {
-    cout << "UNSAT\n";
-    cout << "[!] No differential pair found satisfying the requested "
-            "masking/divergence pattern for '" << fn << "'.\n";
-  } else {
-    cout << "UNKNOWN / TIMEOUT\n";
+  if (!haveSweepVar) {
+    cerr << "[warning] no VariedInput arg found to sweep over -- falling "
+            "back to a single unconstrained check.\n";
+    check_result res = slv.check();
+    cout << (res == sat ? "SAT!\n" : res == unsat ? "UNSAT\n" : "UNKNOWN\n");
+    return res == sat ? 0 : 1;
   }
+
+  run_sweep(ctx, slv, sweepVar, spec, buffers, c1v, f1v, c2v, f2v, fn, fn_path,
+            correct_src, faulty_src, GLOBAL_BASE_CORRECT, GLOBAL_BASE_FAULTY,
+            FINAL_VERSION_CORRECT, FINAL_VERSION_FAULTY, arr_sort);
 
   return 0;
 }
