@@ -378,8 +378,8 @@ int main(int argc, char **argv) {
   string faulty_src =
       strip_bad_asserts(strip_last_assert(read_file(faulty_path)));
 
-  static const string FINAL_VERSION_CORRECT = "c_10"; // TODO: derive, not hardcode
-  static const string FINAL_VERSION_FAULTY = "c_10";
+  static const string FINAL_VERSION_CORRECT = "c_93"; // TODO: derive, not hardcode
+  static const string FINAL_VERSION_FAULTY = "c_93";
   static const string GLOBAL_BASE_CORRECT = "Global_M_correct";
   static const string GLOBAL_BASE_FAULTY = "Global_M_faulty";
 
@@ -548,7 +548,7 @@ int main(int argc, char **argv) {
 
   // Example differential condition (same intent as the original
   // ineffective_query): fault masked in trial 1, diverges in trial 2.
-  // slv.add(c1v == f1v);
+  slv.add(c1v == f1v);
   // slv.add(c2v != f2v);
 
   cout << "================ SOLVER ================\n";
@@ -718,11 +718,11 @@ int main(int argc, char **argv) {
       };
 
       write_trial(
-          "exec1_ineffective_witness", [](VariedVals &vv) { return vv.v1; },
+          "exec1_ineffective", [](VariedVals &vv) { return vv.v1; },
           out1_correct, out1_faulty);
       wj << ",\n";
       write_trial(
-          "exec2_divergence_witness", [](VariedVals &vv) { return vv.v2; },
+          "exec2", [](VariedVals &vv) { return vv.v2; },
           out2_correct, out2_faulty);
       wj << "\n";
 

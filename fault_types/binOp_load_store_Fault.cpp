@@ -40,7 +40,7 @@
 #include <memory>
 
 using namespace llvm;
-static constexpr unsigned kMaxUnrollTripCount = 10000;
+static constexpr unsigned kMaxUnrollTripCount = 2000;
 
 
 void run_command(const std::string &cmd) {

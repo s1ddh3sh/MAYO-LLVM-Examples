@@ -53,7 +53,7 @@
 #include "json_parser.h"
 
 using namespace llvm;
-static constexpr unsigned kMaxUnrollTripCount = 10000;
+static constexpr unsigned kMaxUnrollTripCount = 2000;
 
 enum FaultMode { LOOP_SKIP = 0, FUNC_SKIP = 1 };
 static Instruction *getInstByIndex(Function &F, unsigned targetInst) {
