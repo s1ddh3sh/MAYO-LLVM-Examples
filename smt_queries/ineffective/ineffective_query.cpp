@@ -523,9 +523,9 @@ int main(int argc, char **argv) {
   tactic pipeline = simp & prop & eqs & core;
 
   solver slv = pipeline.mk_solver();
-  params p(ctx);
-  p.set("timeout", 5000u);
-  slv.set(p);
+  // params p(ctx);
+  // p.set("timeout", 5000u);
+  // slv.set(p);
   expr_vector C1 = ctx.parse_file(c1.c_str());
   expr_vector F1 = ctx.parse_file(f1.c_str());
   expr_vector C2 = ctx.parse_file(c2.c_str());
