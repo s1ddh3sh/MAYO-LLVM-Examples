@@ -13,7 +13,7 @@ if(NOT Z3_FOUND)
   endif()
 endif()
 
-add_executable(ineffective_query ineffective/ineffective_query.cpp)
+add_executable(ineffective_query ineffective/multiThread_query.cpp)
 
 target_link_libraries(ineffective_query
   PRIVATE
