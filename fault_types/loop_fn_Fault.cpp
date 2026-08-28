@@ -645,7 +645,7 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
         anchor = new GlobalVariable(
             ExtractedM, argTy, /*isConstant=*/false,
             GlobalValue::ExternalLinkage,
-            ConstantInt::getNullValue(argTy), // baked as the GLOBAL's initializer
+            ConstantInt::get(argTy, initVal), // baked as the GLOBAL's initializer
                                        // (lands in .data), not a runtime store
             anchorName);
       }
@@ -1405,14 +1405,14 @@ int main(int argc, char **argv) {
     return 1;
   }
   stripOutputAssertions(*funcModule);
-  std::string original = "../../results/" + funcName + "/" + funcName + ".ll";
+  std::string original = "../../test_mayo/" + funcName + "/" + funcName + ".ll";
 
   dump_module(*funcModule, original);
   outs() << "Wrote" << original << "\n";
 
   // Clone and inject fault
   std::string faultyFile =
-      "../../results/" + funcName + "/loopOrFuncSkip/" + funcName;
+      "../../test_mayo/" + funcName + "/loopOrFuncSkip/" + funcName;
   std::string outFile;
   if (mode == LOOP_SKIP) {
     auto faultModule = CloneModule(*funcModule);

@@ -1214,7 +1214,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   stripOutputAssertions(*funcModule); 
-  std::string filename = "../../results/" + funcName + "/";
+  std::string filename = "../../test_mayo/" + funcName + "/";
   // std::string filename = "../results/" + funcName + ".ll";
   dump_module(*funcModule, filename + funcName + ".ll");
   outs() << "Wrote" << filename << funcName << "\n";
