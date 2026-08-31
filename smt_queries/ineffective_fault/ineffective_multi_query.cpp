@@ -65,7 +65,7 @@ string strip_bad_asserts(const string &src) {
 }
 
 string write_suffixed(const string &content, const string &tag,
-                       const string &outDir) {
+                      const string &outDir) {
   string result = content;
   regex ident(R"(\b((?:i|c|b)_\d+_[A-Za-z0-9_.]+)\b)");
   result = regex_replace(result, ident, "$1_" + tag);
@@ -81,14 +81,14 @@ string write_suffixed(const string &content, const string &tag,
 }
 
 static void assert_no_overlap(solver &slv, context &ctx, expr startA,
-                               long long lenA, expr startB, long long lenB) {
+                              long long lenA, expr startB, long long lenB) {
   expr endA = startA + ctx.int_val((int)lenA);
   expr endB = startB + ctx.int_val((int)lenB);
   slv.add(endA <= startB || endB <= startA);
 }
 
 static string find_initial_version(const string &src, const string &base,
-                                    const string &finalVersion) {
+                                   const string &finalVersion) {
   string current = finalVersion;
   static const regex numRe(R"(c_(\d+)$)");
   while (true) {
@@ -173,18 +173,18 @@ struct PinnedBuffer {
 };
 
 static string resolve_index_var(const string &src, const string &base,
-                                 bool faulty) {
+                                bool faulty) {
   string suffix = faulty ? "_faulty" : "_correct";
   regex re("i_(\\d+)_" + base + suffix);
   smatch m;
   if (regex_search(src, m, re))
     return m[0].str();
   throw runtime_error("Could not resolve index var for '" + base +
-                       "' (looked for i_<N>_" + base + suffix + ")");
+                      "' (looked for i_<N>_" + base + suffix + ")");
 }
 
 static string resolve_final_ssa_symbol(const string &src, const string &base,
-                                        bool faulty) {
+                                       bool faulty) {
   string suffix = faulty ? "_faulty" : "_correct";
   regex re("i_(\\d+)_" + base + suffix);
   auto begin = sregex_iterator(src.begin(), src.end(), re);
@@ -200,7 +200,7 @@ static string resolve_final_ssa_symbol(const string &src, const string &base,
   }
   if (bestN < 0)
     throw runtime_error("Could not resolve any SSA version for '" + base +
-                         "' (looked for i_<N>_" + base + suffix + ")");
+                        "' (looked for i_<N>_" + base + suffix + ")");
   return best;
 }
 
@@ -209,8 +209,8 @@ static FunctionSpec get_function_spec(const string &fn) {
     FunctionSpec spec;
     spec.fnName = "mat_add";
     spec.args = {
-        {"Vdec", ArgKind::Buffer, ArgRole::FixedInput, "Vdec", 780, 78, 1},
-        {"Ox", ArgKind::Buffer, ArgRole::VariedInput, "Ox", 780, 78},
+        {"Vdec", ArgKind::Buffer, ArgRole::FixedInput, "Vdec", 1719, 78, 1},
+        {"Ox", ArgKind::Buffer, ArgRole::VariedInput, "Ox", 1719, 78},
     };
     spec.isScalarOutput = false;
     spec.outputIndexVar = "s";
@@ -275,17 +275,13 @@ struct ValueResult {
   vector<long long> out1_correct, out1_faulty, out2_correct, out2_faulty;
 };
 
-static ValueResult check_value(int value, const FunctionSpec &spec,
-                                const string &c1, const string &f1,
-                                const string &c2, const string &f2,
-                                const string &correct_src,
-                                const string &faulty_src,
-                                const string &GLOBAL_BASE_CORRECT,
-                                const string &GLOBAL_BASE_FAULTY,
-                                const string &FINAL_VERSION_CORRECT,
-                                const string &FINAL_VERSION_FAULTY,
-                                const string &INITIAL_VERSION_CORRECT,
-                                const string &INITIAL_VERSION_FAULTY) {
+static ValueResult check_value(
+    int value, const FunctionSpec &spec, const string &c1, const string &f1,
+    const string &c2, const string &f2, const string &correct_src,
+    const string &faulty_src, const string &GLOBAL_BASE_CORRECT,
+    const string &GLOBAL_BASE_FAULTY, const string &FINAL_VERSION_CORRECT,
+    const string &FINAL_VERSION_FAULTY, const string &INITIAL_VERSION_CORRECT,
+    const string &INITIAL_VERSION_FAULTY) {
   ValueResult out;
   out.value = value;
 
@@ -298,22 +294,26 @@ static ValueResult check_value(int value, const FunctionSpec &spec,
   tactic pipeline = simp & prop & eqs & core;
   solver slv = pipeline.mk_solver();
 
-  // params p(ctx);
-  // p.set("timeout", 10000u); // 10 seconds per value
-  // slv.set(p);
+  params p(ctx);
+  p.set("timeout", 10000u); // 10 seconds per value
+  slv.set(p);
 
   expr_vector C1 = ctx.parse_file(c1.c_str());
   expr_vector F1 = ctx.parse_file(f1.c_str());
   expr_vector C2 = ctx.parse_file(c2.c_str());
   expr_vector F2 = ctx.parse_file(f2.c_str());
-  for (expr e : C1) slv.add(e);
-  for (expr e : F1) slv.add(e);
-  for (expr e : C2) slv.add(e);
-  for (expr e : F2) slv.add(e);
+  for (expr e : C1)
+    slv.add(e);
+  for (expr e : F1)
+    slv.add(e);
+  for (expr e : C2)
+    slv.add(e);
+  for (expr e : F2)
+    slv.add(e);
 
   z3::sort arr_sort = ctx.array_sort(ctx.int_sort(), ctx.int_sort());
   auto init_arr = [&](const string &base, const string &initVer,
-                       const string &tag) {
+                      const string &tag) {
     return ctx.constant((initVer + "_" + base + "_" + tag).c_str(), arr_sort);
   };
   expr initC1 = init_arr(GLOBAL_BASE_CORRECT, INITIAL_VERSION_CORRECT, "C1");
@@ -343,7 +343,7 @@ static ValueResult check_value(int value, const FunctionSpec &spec,
   for (size_t i = 0; i < buffers.size(); i++)
     for (size_t j = i + 1; j < buffers.size(); j++)
       assert_no_overlap(slv, ctx, buffers[i].startC1, buffers[i].spec->length,
-                         buffers[j].startC1, buffers[j].spec->length);
+                        buffers[j].startC1, buffers[j].spec->length);
 
   expr sweepVar = ctx.int_val(0);
   bool haveSweepVar = false;
@@ -381,8 +381,10 @@ static ValueResult check_value(int value, const FunctionSpec &spec,
   expr c2v = ctx.int_val(0), f2v = ctx.int_val(0);
 
   if (spec.isScalarOutput) {
-    string anchC = resolve_final_ssa_symbol(correct_src, spec.outputAnchorName, false);
-    string anchF = resolve_final_ssa_symbol(faulty_src, spec.outputAnchorName, true);
+    string anchC =
+        resolve_final_ssa_symbol(correct_src, spec.outputAnchorName, false);
+    string anchF =
+        resolve_final_ssa_symbol(faulty_src, spec.outputAnchorName, true);
     c1v = ctx.int_const((anchC + "_C1").c_str());
     f1v = ctx.int_const((anchF + "_F1").c_str());
     c2v = ctx.int_const((anchC + "_C2").c_str());
@@ -391,6 +393,10 @@ static ValueResult check_value(int value, const FunctionSpec &spec,
     string ovC = resolve_index_var(correct_src, spec.outputIndexVar, false);
     string ovF = resolve_index_var(faulty_src, spec.outputIndexVar, true);
     expr outPtrC1 = ctx.int_const((ovC + "_C1").c_str());
+    // if (!spec.isScalarOutput) {
+    //   expr sC = ctx.int_const((ovC).c_str()); // or reuse outPtrC1 before offset
+    //   slv.add(outPtrC1 >= 0 && outPtrC1 < ctx.int_val((int)spec.outputLength));
+    // }
     expr outPtrF1 = ctx.int_const((ovF + "_F1").c_str());
     expr outPtrC2 = ctx.int_const((ovC + "_C2").c_str());
     expr outPtrF2 = ctx.int_const((ovF + "_F2").c_str());
@@ -399,7 +405,7 @@ static ValueResult check_value(int value, const FunctionSpec &spec,
     slv.add(outPtrC1 == outPtrF2);
 
     auto final_arr = [&](const string &base, const string &finVer,
-                          const string &tag) {
+                         const string &tag) {
       return ctx.constant((finVer + "_" + base + "_" + tag).c_str(), arr_sort);
     };
     expr finC1 = final_arr(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C1");
@@ -468,7 +474,7 @@ static ValueResult check_value(int value, const FunctionSpec &spec,
     expr outPtrC2 = ctx.int_const((ovC + "_C2").c_str());
     expr outPtrF2 = ctx.int_const((ovF + "_F2").c_str());
     auto final_arr2 = [&](const string &base, const string &finVer,
-                           const string &tag) {
+                          const string &tag) {
       return ctx.constant((finVer + "_" + base + "_" + tag).c_str(), arr_sort);
     };
     expr finC1b = final_arr2(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C1");
@@ -496,7 +502,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   string fn = argv[1];
-  string fn_path = "../../results/" + fn + "/";
+  string fn_path = "../../test_mayo/" + fn + "/";
   string correct_path = fn_path + fn + ".smt2";
   string faulty_dir = fn_path + "loopOrFuncSkip/";
 
@@ -518,15 +524,16 @@ int main(int argc, char **argv) {
   string faulty_src =
       strip_bad_asserts(strip_last_assert(read_file(faulty_path)));
 
-  static const string FINAL_VERSION_CORRECT = "c_93"; // TODO: derive, not hardcode
+  static const string FINAL_VERSION_CORRECT =
+      "c_93"; // TODO: derive, not hardcode
   static const string FINAL_VERSION_FAULTY = "c_93";
   static const string GLOBAL_BASE_CORRECT = "Global_M_correct";
   static const string GLOBAL_BASE_FAULTY = "Global_M_faulty";
 
-  string INITIAL_VERSION_CORRECT =
-      find_initial_version(correct_src, GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT);
-  string INITIAL_VERSION_FAULTY =
-      find_initial_version(faulty_src, GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY);
+  string INITIAL_VERSION_CORRECT = find_initial_version(
+      correct_src, GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT);
+  string INITIAL_VERSION_FAULTY = find_initial_version(
+      faulty_src, GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY);
 
   // Written once, up front -- every thread reads the same four files.
   string c1 = write_suffixed(correct_src, "C1", fn_path);
@@ -543,11 +550,10 @@ int main(int argc, char **argv) {
   threads.reserve(16);
   for (int v = 0; v < 16; v++) {
     threads.emplace_back([&, v]() {
-      results[v] = check_value(v, spec, c1, f1, c2, f2, correct_src,
-                                faulty_src, GLOBAL_BASE_CORRECT,
-                                GLOBAL_BASE_FAULTY, FINAL_VERSION_CORRECT,
-                                FINAL_VERSION_FAULTY, INITIAL_VERSION_CORRECT,
-                                INITIAL_VERSION_FAULTY);
+      results[v] = check_value(v, spec, c1, f1, c2, f2, correct_src, faulty_src,
+                               GLOBAL_BASE_CORRECT, GLOBAL_BASE_FAULTY,
+                               FINAL_VERSION_CORRECT, FINAL_VERSION_FAULTY,
+                               INITIAL_VERSION_CORRECT, INITIAL_VERSION_FAULTY);
     });
   }
   for (auto &t : threads)
@@ -584,66 +590,71 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  // ---- Combined witness.json covering every SAT value ----
-  string outLabel = !spec.outputLabel.empty() ? spec.outputLabel
-                     : spec.isScalarOutput      ? "ret"
-                                                 : spec.outputIndexVar;
+  // // ---- Combined witness.json covering every SAT value ----
+  // string outLabel = !spec.outputLabel.empty() ? spec.outputLabel
+  //                   : spec.isScalarOutput     ? "ret"
+  //                                             : spec.outputIndexVar;
 
-  string witness_path = fn_path + "witness.json";
-  ofstream wj(witness_path);
-  wj << "{\n";
-  wj << "  \"function\": \"" << fn << "\",\n";
-  wj << "  \"sat_values\": "
-     << json_arr(vector<long long>(satValues.begin(), satValues.end()))
-     << ",\n";
-  wj << "  \"trials\": [\n";
+  // string witness_path = fn_path + "witness.json";
+  // ofstream wj(witness_path);
+  // wj << "{\n";
+  // wj << "  \"function\": \"" << fn << "\",\n";
+  // wj << "  \"sat_values\": "
+  //    << json_arr(vector<long long>(satValues.begin(), satValues.end()))
+  //    << ",\n";
+  // wj << "  \"trials\": [\n";
 
-  bool firstTrial = true;
-  for (auto &r : results) {
-    if (r.res != sat)
-      continue;
+  // bool firstTrial = true;
+  // for (auto &r : results) {
+  //   if (r.res != sat)
+  //     continue;
 
-    auto writeInputsObj = [&](std::function<vector<long long>(VariedEntry &)> pick) {
-      wj << "        \"inputs\": {\n";
-      bool ifirst = true;
-      for (auto &fe : r.fixedVals) {
-        wj << (ifirst ? "          " : ",\n          ") << "\"" << fe.name
-           << "\": " << json_arr(fe.vals);
-        ifirst = false;
-      }
-      for (auto &ve : r.variedVals) {
-        wj << (ifirst ? "          " : ",\n          ") << "\"" << ve.name
-           << "\": " << json_arr(pick(ve));
-        ifirst = false;
-      }
-      wj << "\n        }";
-    };
+  //   auto writeInputsObj =
+  //       [&](std::function<vector<long long>(VariedEntry &)> pick) {
+  //         wj << "        \"inputs\": {\n";
+  //         bool ifirst = true;
+  //         for (auto &fe : r.fixedVals) {
+  //           wj << (ifirst ? "          " : ",\n          ") << "\"" << fe.name
+  //              << "\": " << json_arr(fe.vals);
+  //           ifirst = false;
+  //         }
+  //         for (auto &ve : r.variedVals) {
+  //           wj << (ifirst ? "          " : ",\n          ") << "\"" << ve.name
+  //              << "\": " << json_arr(pick(ve));
+  //           ifirst = false;
+  //         }
+  //         wj << "\n        }";
+  //       };
 
-    wj << (firstTrial ? "    {\n" : ",\n    {\n");
-    wj << "      \"sweep_value\": " << r.value << ",\n";
-    wj << "      \"exec1_ineffective\": {\n";
-    writeInputsObj([](VariedEntry &ve) { return ve.v1; });
-    wj << ",\n";
-    wj << "        \"expected\": {\n";
-    wj << "          \"" << outLabel << "_correct\": " << json_arr(r.out1_correct) << ",\n";
-    wj << "          \"" << outLabel << "_faulty\": " << json_arr(r.out1_faulty) << "\n";
-    wj << "        }\n";
-    wj << "      },\n";
-    wj << "      \"exec2\": {\n";
-    writeInputsObj([](VariedEntry &ve) { return ve.v2; });
-    wj << ",\n";
-    wj << "        \"expected\": {\n";
-    wj << "          \"" << outLabel << "_correct\": " << json_arr(r.out2_correct) << ",\n";
-    wj << "          \"" << outLabel << "_faulty\": " << json_arr(r.out2_faulty) << "\n";
-    wj << "        }\n";
-    wj << "      }\n";
-    wj << "    }";
-    firstTrial = false;
-  }
+  //   wj << (firstTrial ? "    {\n" : ",\n    {\n");
+  //   wj << "      \"sweep_value\": " << r.value << ",\n";
+  //   wj << "      \"exec1_ineffective\": {\n";
+  //   writeInputsObj([](VariedEntry &ve) { return ve.v1; });
+  //   wj << ",\n";
+  //   wj << "        \"expected\": {\n";
+  //   wj << "          \"" << outLabel
+  //      << "_correct\": " << json_arr(r.out1_correct) << ",\n";
+  //   wj << "          \"" << outLabel << "_faulty\": " << json_arr(r.out1_faulty)
+  //      << "\n";
+  //   wj << "        }\n";
+  //   wj << "      },\n";
+  //   wj << "      \"exec2\": {\n";
+  //   writeInputsObj([](VariedEntry &ve) { return ve.v2; });
+  //   wj << ",\n";
+  //   wj << "        \"expected\": {\n";
+  //   wj << "          \"" << outLabel
+  //      << "_correct\": " << json_arr(r.out2_correct) << ",\n";
+  //   wj << "          \"" << outLabel << "_faulty\": " << json_arr(r.out2_faulty)
+  //      << "\n";
+  //   wj << "        }\n";
+  //   wj << "      }\n";
+  //   wj << "    }";
+  //   firstTrial = false;
+  // }
 
-  wj << "\n  ]\n";
-  wj << "}\n";
-  cout << "[+] witness exported to " << witness_path << "\n";
+  // wj << "\n  ]\n";
+  // wj << "}\n";
+  // cout << "[+] witness exported to " << witness_path << "\n";
 
   return 0;
 }

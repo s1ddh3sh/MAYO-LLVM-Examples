@@ -233,8 +233,8 @@ static FunctionSpec get_function_spec(const string &fn) {
     FunctionSpec spec;
     spec.fnName = "mat_add";
     spec.args = {
-        {"Vdec", ArgKind::Buffer, ArgRole::FixedInput, "Vdec", 780, 78, 1},
-        {"Ox", ArgKind::Buffer, ArgRole::VariedInput, "Ox", 780, 78},
+        {"Vdec", ArgKind::Buffer, ArgRole::FixedInput, "Vdec", 1719, 78, 1},
+        {"Ox", ArgKind::Buffer, ArgRole::VariedInput, "Ox", 1719, 78},
     };
     spec.isScalarOutput = false;
     spec.outputIndexVar = "s";
@@ -478,7 +478,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   string fn = argv[1];
-  string fn_path = "../../results/" + fn + "/";
+  string fn_path = "../../test_mayo/" + fn + "/";
   string correct_path = fn_path + fn + ".smt2";
   string faulty_dir = fn_path + "loopOrFuncSkip/";
 
@@ -523,9 +523,9 @@ int main(int argc, char **argv) {
   tactic pipeline = simp & prop & eqs & core;
 
   solver slv = pipeline.mk_solver();
-  // params p(ctx);
-  // p.set("timeout", 5000u);
-  // slv.set(p);
+  params p(ctx);
+  p.set("timeout", 5000u);
+  slv.set(p);
   expr_vector C1 = ctx.parse_file(c1.c_str());
   expr_vector F1 = ctx.parse_file(f1.c_str());
   expr_vector C2 = ctx.parse_file(c2.c_str());
@@ -634,6 +634,10 @@ int main(int argc, char **argv) {
     string ovC = resolve_index_var(correct_src, spec.outputIndexVar, false);
     string ovF = resolve_index_var(faulty_src, spec.outputIndexVar, true);
     expr outPtrC1 = ctx.int_const((ovC + "_C1").c_str());
+    // if (!spec.isScalarOutput) {
+    //   expr sC = ctx.int_const((ovC).c_str()); // or reuse outPtrC1 before offset
+    //   slv.add(outPtrC1 >= 0 && outPtrC1 < ctx.int_val((int)spec.outputLength));
+    // }
     expr outPtrF1 = ctx.int_const((ovF + "_F1").c_str());
     expr outPtrC2 = ctx.int_const((ovC + "_C2").c_str());
     expr outPtrF2 = ctx.int_const((ovF + "_F2").c_str());
