@@ -551,8 +551,8 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
         anchor = new GlobalVariable(
             ExtractedM, argTy, /*isConstant=*/false,
             GlobalValue::ExternalLinkage,
-            ConstantInt::getNullValue(argTy), // baked as the GLOBAL's initializer
-                                       // (lands in .data), not a runtime store
+            ConstantInt::get(argTy, initVal), // baked as the GLOBAL's initializer
+                        // (lands in .data), not a runtime store
             anchorName);
       }
       Value *loaded =
@@ -673,7 +673,7 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
   errs() << "Created driver function for " << TargetF->getName() << "\n";
 }
 
-enum class FaultModel { Undef, Zero, OpB, OpC, Mem };
+enum class FaultModel { Undef, Zero, OpB, OpA, Mem };
 static Instruction *getInstByIndex(Function &F, unsigned targetInst) {
   unsigned idx = 0;
   for (BasicBlock &BB : F) {
@@ -712,8 +712,17 @@ static bool isFirstIterationBlock(const BasicBlock &BB) {
     return true;
   return false;
 }
+static bool matchesTargetKind(Instruction *I, bool wantBinOp,
+                              bool wantLoadOrStore) {
+  if (wantBinOp)
+    return isa<BinaryOperator>(I);
+  if (wantLoadOrStore)
+    return isa<LoadInst>(I) || isa<StoreInst>(I);
+  return true;
+}
 
-static Instruction *findInstByLocator(Function &F, const InstLocator &loc) {
+static Instruction *findInstByLocator(Function &F, const InstLocator &loc,
+                                      bool wantBinOp, bool wantLoadOrStore) {
   if (loc.hasDbg) {
     Instruction *firstIterMatch = nullptr;
     Instruction *anyMatch = nullptr;
@@ -723,7 +732,8 @@ static Instruction *findInstByLocator(Function &F, const InstLocator &loc) {
         DebugLoc DL = I.getDebugLoc();
         if (!DL || DL.getLine() != loc.dbgLine || DL.getCol() != loc.dbgCol)
           continue;
-
+        if (!matchesTargetKind(&I, wantBinOp, wantLoadOrStore))
+          continue;
         if (!anyMatch)
           anyMatch = &I;
         if (!firstIterMatch && isFirstIterationBlock(BB))
@@ -778,7 +788,10 @@ public:
 
     bool modified = false;
 
-    Instruction *I = findInstByLocator(F, loc);
+    bool wantBinOp = (FM != FaultModel::Mem);
+    bool wantLoadOrStore = (FM == FaultModel::Mem);
+
+    Instruction *I = findInstByLocator(F, loc, wantBinOp, wantLoadOrStore);
     // outs() << *I;
     if (!I) {
       errs() << "No instruction found for locator\n";
@@ -808,7 +821,7 @@ public:
         binOp->setOperand(0, ConstantInt::get(ty, 0));
         modified = true;
         break;
-      case FaultModel::OpC:
+      case FaultModel::OpA:
         binOp->setOperand(1, ConstantInt::get(ty, 0));
         modified = true;
         break;
@@ -1118,8 +1131,8 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  InstLocator locator = captureInstLocator(origInst, line);
-  if (!locator.hasDbg) {
+  InstLocator sourceLoc = captureInstLocator(origInst, line);
+  if (!sourceLoc.hasDbg) {
     errs() << "Warning: instruction at line " << line
            << " has no debug location; post-optimization re-lookup will "
               "fall back to raw index and may be unreliable.\n";
@@ -1213,7 +1226,23 @@ int main(int argc, char **argv) {
     errs() << "Invalid IR\n";
     return 1;
   }
-  stripOutputAssertions(*funcModule); 
+  Function *postPipelineF = funcModule->getFunction(funcName);
+  if (!postPipelineF) {
+    errs() << "Function not found in post-pipeline module: " << funcName
+           << "\n";
+    return 1;
+  }
+  Instruction *postPipelineInst = findInstByLocator(*postPipelineF, sourceLoc, isBinOp, isLoadOrStore);
+  if (!postPipelineInst) {
+    errs() << "Could not re-locate target instruction after unroll/optimize "
+              "pipeline (source line "
+           << line << ")\n";
+    return 1;
+  }
+  InstLocator locator =
+      captureInstLocator(postPipelineInst, /*fallbackIndex=*/0);
+
+  stripOutputAssertions(*funcModule);
   std::string filename = "../../test_mayo/" + funcName + "/";
   // std::string filename = "../results/" + funcName + ".ll";
   dump_module(*funcModule, filename + funcName + ".ll");
@@ -1239,7 +1268,7 @@ int main(int argc, char **argv) {
         {FaultModel::Undef, "undef"},
         {FaultModel::Zero, "zero"},
         {FaultModel::OpB, "opB"},
-        {FaultModel::OpC, "opC"},
+        {FaultModel::OpA, "opA"},
     };
     faultSubdir = "binOpFault/";
   } else { // isLoadOrStore
