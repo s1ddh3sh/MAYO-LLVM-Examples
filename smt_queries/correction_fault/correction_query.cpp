@@ -179,6 +179,16 @@ struct FunctionSpec {
   // inputs through structurally identical formulas, so they come out
   // equal for free. We still read them back post-SAT to sanity-check.
   long long knownCorrectionIndex = -1;
+
+  // For the correction (brute-force-alpha) query: pin byte 0 of the
+  // first VariedInput arg to this ONE concrete value, so correct[idx]
+  // and faulty[idx] become fully determined outputs of a single
+  // (simulated) signing execution -- exactly what an attacker observes
+  // from one real faulty signature. Leaving this input free while
+  // brute-forcing alpha is meaningless: the solver could just pick that
+  // input to match whatever alpha is being tried, giving a trivial SAT
+  // for every candidate. Required (>=0) for buffer outputs.
+  long long variedTestValue = -1;
 };
 
 // A Buffer arg's pointer, pinned equal across correct/faulty, plus its
@@ -235,6 +245,7 @@ static FunctionSpec get_function_spec(const string &fn) {
     spec.outputLength = 78;
     spec.fieldSize = 16;
     spec.knownCorrectionIndex = 0; // fault only ever touches s[0]
+    spec.variedTestValue = 5;      // one arbitrary, fixed Ox[0] scenario
     return spec;
   }
   if (fn == "m_vec_add") {
@@ -300,14 +311,14 @@ struct CorrectionResult {
 };
 
 static CorrectionResult check_value_correction(
-    int value, const FunctionSpec &spec, const string &c, const string &f,
-    const string &correct_src, const string &faulty_src,
+    int alphaCandidate, const FunctionSpec &spec, const string &c,
+    const string &f, const string &correct_src, const string &faulty_src,
     const string &GLOBAL_BASE_CORRECT, const string &GLOBAL_BASE_FAULTY,
     const string &FINAL_VERSION_CORRECT, const string &FINAL_VERSION_FAULTY,
     const string &INITIAL_VERSION_CORRECT,
     const string &INITIAL_VERSION_FAULTY) {
   CorrectionResult out;
-  out.value = value;
+  out.value = alphaCandidate;
 
   context ctx; // fresh context per value -- z3 objects aren't shareable
 
@@ -319,7 +330,7 @@ static CorrectionResult check_value_correction(
   solver slv = pipeline.mk_solver();
 
   params p(ctx);
-  p.set("timeout", 5000u);
+  p.set("timeout", 30000u);
   slv.set(p);
 
   expr_vector C = ctx.parse_file(c.c_str());
@@ -356,9 +367,6 @@ static CorrectionResult check_value_correction(
       assert_no_overlap(slv, ctx, buffers[i].startC, buffers[i].spec->length,
                          buffers[j].startC, buffers[j].spec->length);
 
-  expr sweepVar = ctx.int_val(0);
-  bool haveSweepVar = false;
-
   for (auto &pb : buffers) {
     const ArgSpec &a = *pb.spec;
     if (a.role == ArgRole::FixedInput) {
@@ -373,23 +381,28 @@ static CorrectionResult check_value_correction(
         expr addr = ctx.int_val((int)(a.offset + i)) + pb.pC;
         expr oi = ctx.int_const((a.name + "_" + to_string(i)).c_str());
         slv.add(select(initC, addr) == oi);
-        slv.add(oi >= ctx.int_val(0));
-        slv.add(oi < ctx.int_val(16));
-        if (i == 0 && !haveSweepVar) {
-          sweepVar = oi;
-          haveSweepVar = true;
+        if (i == 0 && spec.variedTestValue >= 0) {
+          // Pin this to ONE concrete value -- this is what makes the
+          // "brute-force alpha against a fixed observed signature" check
+          // meaningful. Left free, the solver could pick this input to
+          // match whatever alpha we're trying, making every alpha look
+          // like a valid correction.
+          slv.add(oi == ctx.int_val((int)spec.variedTestValue));
+        } else {
+          slv.add(oi >= ctx.int_val(0));
+          slv.add(oi < ctx.int_val(16));
         }
       }
     }
   }
 
   unsigned bits = bits_for_field(spec.fieldSize);
-  expr alpha = ctx.int_const("alpha");
-  slv.add(alpha >= ctx.int_val(0));
-  slv.add(alpha < ctx.int_val((int)spec.fieldSize));
-  // Uncomment to require a *genuine* correction (fault must have actually
-  // perturbed the byte being corrected) rather than allowing alpha == 0:
-  // slv.add(alpha != 0);
+  // alpha is now a GROUND constant supplied by the outer brute-force loop,
+  // not a free/existential Z3 variable -- each check is now a plain
+  // equality test between two fully-determined values (given the pinned
+  // inputs above), exactly mirroring how the ineffective-query sweep
+  // trades one hard existential search for many cheap concrete checks.
+  expr alpha = ctx.int_val(alphaCandidate);
   expr alphaBV = int2bv(bits, alpha);
 
   expr cv0 = ctx.int_val(0), fv0 = ctx.int_val(0);
@@ -430,10 +443,6 @@ static CorrectionResult check_value_correction(
 
   expr corrected = bv2int(int2bv(bits, fv0) ^ alphaBV, false);
   slv.add(cv0 == corrected);
-
-  if (!haveSweepVar)
-    throw runtime_error("No VariedInput arg found to sweep over");
-  slv.add(sweepVar == ctx.int_val(value));
 
   out.res = slv.check();
   if (out.res != sat)
@@ -510,6 +519,11 @@ int main(int argc, char **argv) {
     throw runtime_error(
         "correction_query requires spec.knownCorrectionIndex to be set "
         "for buffer outputs (the byte the fault touches must be known)");
+  if (spec.variedTestValue < 0)
+    throw runtime_error(
+        "correction_query requires spec.variedTestValue to be set -- "
+        "brute-forcing alpha against a free/unconstrained input is "
+        "meaningless (every alpha would look correctable)");
 
   string correct_src =
       strip_bad_asserts(strip_last_assert(read_file(correct_path)));
@@ -537,13 +551,21 @@ int main(int argc, char **argv) {
   ostringstream trialsJson;
   bool firstTrial = true;
 
-  for (int v = 0; v < 16; v++) {
-    cout << "\n================ value " << v << " ================\n";
-    CorrectionResult r = check_value_correction(
-        v, spec, c, f, correct_src, faulty_src, GLOBAL_BASE_CORRECT,
-        GLOBAL_BASE_FAULTY, FINAL_VERSION_CORRECT, FINAL_VERSION_FAULTY,
-        INITIAL_VERSION_CORRECT, INITIAL_VERSION_FAULTY);
+  cout << "Brute-forcing alpha in F_" << spec.fieldSize
+       << " against ONE fixed scenario (variedTestValue = "
+       << spec.variedTestValue << ")\n";
 
+  for (int alphaCandidate = 0; alphaCandidate < spec.fieldSize;
+       alphaCandidate++) {
+    cout << "\n================ alpha = " << alphaCandidate
+         << " ================\n";
+    CorrectionResult r = check_value_correction(
+        alphaCandidate, spec, c, f, correct_src, faulty_src,
+        GLOBAL_BASE_CORRECT, GLOBAL_BASE_FAULTY, FINAL_VERSION_CORRECT,
+        FINAL_VERSION_FAULTY, INITIAL_VERSION_CORRECT,
+        INITIAL_VERSION_FAULTY);
+
+    int v = alphaCandidate;
     if (r.res == sat) {
       satValues.push_back(v);
       cout << "  -> SAT   correction index = " << r.corrIndex
@@ -568,7 +590,7 @@ int main(int argc, char **argv) {
       }
 
       trialsJson << (firstTrial ? "" : ",\n") << "    {\n";
-      trialsJson << "      \"sweep_value\": " << v << ",\n";
+      trialsJson << "      \"alpha_candidate\": " << v << ",\n";
       trialsJson << "      \"correction\": {\n";
       trialsJson << "        \"index\": " << r.corrIndex << ",\n";
       trialsJson << "        \"alpha\": " << r.alpha << "\n";
@@ -604,24 +626,24 @@ int main(int argc, char **argv) {
     }
   }
 
-  cout << "\n================ SWEEP SUMMARY ================\n";
-  cout << "SAT (correctable) for values:";
+  cout << "\n================ BRUTE-FORCE SUMMARY ================\n";
+  cout << "SAT (correct alpha found) for candidates:";
   for (int v : satValues)
     cout << " " << v;
   cout << "\n";
-  cout << "UNSAT for values:";
+  cout << "UNSAT for candidates:";
   for (int v : unsatValues)
     cout << " " << v;
   cout << "\n";
   if (!unknownValues.empty()) {
-    cout << "UNKNOWN/TIMEOUT for values:";
+    cout << "UNKNOWN/TIMEOUT for candidates:";
     for (int v : unknownValues)
       cout << " " << v;
     cout << "\n";
   }
 
   if (satValues.empty()) {
-    cout << "[!] No SAT value found; no witness exported.\n";
+    cout << "[!] No SAT alpha found; no witness exported.\n";
     return 0;
   }
 
@@ -630,7 +652,7 @@ int main(int argc, char **argv) {
   wj << "{\n";
   wj << "  \"function\": \"" << fn << "\",\n";
   wj << "  \"field_size\": " << spec.fieldSize << ",\n";
-  wj << "  \"sat_values\": "
+  wj << "  \"sat_alpha_candidates\": "
      << json_arr(vector<long long>(satValues.begin(), satValues.end()))
      << ",\n";
   wj << "  \"trials\": [\n";
