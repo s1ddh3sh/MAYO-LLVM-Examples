@@ -26,7 +26,7 @@ target_include_directories(ineffective_query
 )
 
 
-add_executable(correction_query correction_fault/correction_query.cpp)
+add_executable(correction_query correction_fault/correction_multi_query.cpp)
 
 target_link_libraries(correction_query
   PRIVATE

@@ -329,9 +329,9 @@ static CorrectionResult check_value_correction(
   tactic pipeline = simp & prop & eqs & core;
   solver slv = pipeline.mk_solver();
 
-  params p(ctx);
-  p.set("timeout", 30000u);
-  slv.set(p);
+//   params p(ctx);
+//   p.set("timeout", 120000u);
+//   slv.set(p);
 
   expr_vector C = ctx.parse_file(c.c_str());
   expr_vector F = ctx.parse_file(f.c_str());

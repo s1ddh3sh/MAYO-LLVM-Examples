@@ -65,10 +65,8 @@ string strip_bad_asserts(const string &src) {
 }
 
 // NOTE: only ONE copy of each trace is needed here (tag "C" for correct,
-// tag "F" for faulty) -- unlike the ineffective query we don't need a
-// second (C2/F2) trial, since correction-attack is about a single faulty
-// execution and a single existential correction, not a two-execution
-// differential.
+// tag "F" for faulty) -- correction attack is about a single faulty
+// execution, not a two-execution differential.
 string write_suffixed(const string &content, const string &tag,
                        const string &outDir) {
   string result = content;
@@ -171,16 +169,29 @@ struct FunctionSpec {
   string outputLabel;
 
   // GF(q) the output field elements live in -- MAYO uses q=16 throughout,
-  // and correction is modeled as XOR (addition in char-2 fields).
+  // and correction is modeled as XOR (addition in char-2 fields). Also
+  // doubles as the number of alpha candidates brute-forced (one thread
+  // per candidate, 0..fieldSize-1).
   long long fieldSize = 16;
 
   // If >= 0, the output byte known (from the fault site) to need
-  // correction. Skips the expensive existential search over corr_idx and
-  // skips asserting equality on every other output byte -- we only prove
-  // a correction exists at the one byte the fault actually touches.
-  // If -1, falls back to the (much slower) existential search over every
-  // output index, asserting equality/correction at ALL of them.
+  // correction. We assert the correction ONLY at this byte, and assert
+  // nothing about the rest -- proving equality at every byte of a
+  // ~93-store chain is what caused earlier timeouts, and it's
+  // unnecessary: the untouched bytes are fed by the same pinned-equal
+  // inputs through structurally identical formulas, so they come out
+  // equal for free. We still read them back post-SAT to sanity-check.
+  // Required (>=0) for buffer outputs.
   long long knownCorrectionIndex = -1;
+
+  // Pin byte 0 of the first VariedInput arg to this ONE concrete value,
+  // so correct[idx]/faulty[idx] become fully determined outputs of a
+  // single (simulated) signing execution -- exactly what an attacker
+  // observes from one real faulty signature. Leaving this free while
+  // brute-forcing alpha is meaningless: the solver could just pick that
+  // input to match whatever alpha candidate is being tried, making every
+  // candidate look like a valid correction. Required (>=0).
+  long long variedTestValue = -1;
 };
 
 // A Buffer arg's pointer, pinned equal across correct/faulty, plus its
@@ -237,6 +248,7 @@ static FunctionSpec get_function_spec(const string &fn) {
     spec.outputLength = 78;
     spec.fieldSize = 16;
     spec.knownCorrectionIndex = 0; // fault only ever touches s[0]
+    spec.variedTestValue = 5;      // one arbitrary, fixed Ox[0] scenario
     return spec;
   }
   if (fn == "m_vec_add") {
@@ -251,6 +263,8 @@ static FunctionSpec get_function_spec(const string &fn) {
     spec.outputOffset = 18705;
     spec.outputLength = 1;
     spec.fieldSize = 16;
+    spec.knownCorrectionIndex = 0;
+    spec.variedTestValue = 5;
     return spec;
   }
   if (fn == "lincomb") {
@@ -263,14 +277,21 @@ static FunctionSpec get_function_spec(const string &fn) {
     spec.isScalarOutput = true;
     spec.outputAnchorName = "__mbc_ret_anchor_lincomb";
     spec.fieldSize = 16;
+    spec.variedTestValue = 5;
     return spec;
   }
   throw runtime_error("No FunctionSpec registered for '" + fn + "'");
 }
 
 // =====================================================================
-// Per-value correction check, run in its own thread with its own
-// z3::context (same threading discipline as differential_query.cpp).
+// Per-alpha-candidate correction check, run in its own thread with its
+// own z3::context (same threading discipline as differential_query.cpp).
+// alphaCandidate is a GROUND value supplied by the thread's own index --
+// NOT an existential Z3 variable. Combined with pinning Ox[0] to one
+// concrete scenario (spec.variedTestValue), this makes each thread's
+// check a fully-determined equality test with exactly one correct
+// answer, mirroring the ineffective-query's "16 cheap concrete checks
+// instead of one hard existential search" philosophy.
 // =====================================================================
 
 struct FixedEntry {
@@ -283,24 +304,24 @@ struct VariedEntry {
 };
 
 struct CorrectionResult {
-  int value = -1;
+  int value = -1; // the alpha candidate this thread tried
   check_result res = unknown;
-  long long alpha = -1;   // the correction value found, in [0, fieldSize)
-  long long corrIndex = -1; // which output byte needed correction (-1 for scalar output)
+  long long alpha = -1;     // == value once SAT, kept for clarity in output
+  long long corrIndex = -1; // which output byte needed correction (-1 for scalar)
   vector<FixedEntry> fixedVals;
   vector<VariedEntry> variedVals;
   vector<long long> out_correct, out_faulty;
 };
 
 static CorrectionResult check_value_correction(
-    int value, const FunctionSpec &spec, const string &c, const string &f,
-    const string &correct_src, const string &faulty_src,
+    int alphaCandidate, const FunctionSpec &spec, const string &c,
+    const string &f, const string &correct_src, const string &faulty_src,
     const string &GLOBAL_BASE_CORRECT, const string &GLOBAL_BASE_FAULTY,
     const string &FINAL_VERSION_CORRECT, const string &FINAL_VERSION_FAULTY,
     const string &INITIAL_VERSION_CORRECT,
     const string &INITIAL_VERSION_FAULTY) {
   CorrectionResult out;
-  out.value = value;
+  out.value = alphaCandidate;
 
   context ctx; // thread-local -- never shared
 
@@ -309,9 +330,7 @@ static CorrectionResult check_value_correction(
   // bare `smt` core treats these as ordinary array-valued equalities and
   // carries the whole unreduced chain into search. solve-eqs +
   // propagate-values fold these definitional equalities away before the
-  // SAT core ever sees them -- restoring this (it's cheap) is what makes
-  // this tractable, now that we're only adding ONE real constraint on
-  // top instead of the offset-bug-era unconstrained symbolic select.
+  // SAT core ever sees them.
   tactic simp = z3::tactic(ctx, "simplify");
   tactic eqs = z3::tactic(ctx, "solve-eqs");
   tactic prop = z3::tactic(ctx, "propagate-values");
@@ -320,7 +339,9 @@ static CorrectionResult check_value_correction(
   solver slv = pipeline.mk_solver();
 
   params p(ctx);
-  p.set("timeout", 10000u); // 20s per value -- surface unknown instead of hanging
+  p.set("timeout", 120000u); // 2 min per candidate -- SAT case genuinely
+                              // needs to build a full model across ~186
+                              // store operations, not just refute
   slv.set(p);
 
   expr_vector C = ctx.parse_file(c.c_str());
@@ -357,9 +378,6 @@ static CorrectionResult check_value_correction(
       assert_no_overlap(slv, ctx, buffers[i].startC, buffers[i].spec->length,
                          buffers[j].startC, buffers[j].spec->length);
 
-  expr sweepVar = ctx.int_val(0);
-  bool haveSweepVar = false;
-
   for (auto &pb : buffers) {
     const ArgSpec &a = *pb.spec;
     if (a.role == ArgRole::FixedInput) {
@@ -374,24 +392,24 @@ static CorrectionResult check_value_correction(
         expr addr = ctx.int_val((int)(a.offset + i)) + pb.pC;
         expr oi = ctx.int_const((a.name + "_" + to_string(i)).c_str());
         slv.add(select(initC, addr) == oi);
-        slv.add(oi >= ctx.int_val(0));
-        slv.add(oi < ctx.int_val(16));
-        if (i == 0 && !haveSweepVar) {
-          sweepVar = oi;
-          haveSweepVar = true;
+        if (i == 0 && spec.variedTestValue >= 0) {
+          // Pin this to ONE concrete value -- this is what makes
+          // brute-forcing alpha against a fixed observed signature
+          // meaningful. Left free, the solver could pick this input to
+          // match whatever alpha candidate is being tried.
+          slv.add(oi == ctx.int_val((int)spec.variedTestValue));
+        } else {
+          slv.add(oi >= ctx.int_val(0));
+          slv.add(oi < ctx.int_val(16));
         }
       }
     }
   }
 
   unsigned bits = bits_for_field(spec.fieldSize);
-  expr alpha = ctx.int_const("alpha");
-  slv.add(alpha >= ctx.int_val(0));
-  slv.add(alpha < ctx.int_val((int)spec.fieldSize));
-  // Uncomment to require a *genuine* correction (fault must have actually
-  // perturbed the byte being corrected) rather than allowing alpha == 0:
-  // slv.add(alpha != 0);
-
+  // alpha is a GROUND constant -- this thread's candidate index -- not a
+  // free/existential Z3 variable.
+  expr alpha = ctx.int_val(alphaCandidate);
   expr alphaBV = int2bv(bits, alpha);
 
   if (spec.isScalarOutput) {
@@ -404,16 +422,12 @@ static CorrectionResult check_value_correction(
 
     expr corrected = bv2int(int2bv(bits, fv) ^ alphaBV, false);
     slv.add(cv == corrected);
-    // cout << cv << "\n" << correc;
-    slv.add(sweepVar == ctx.int_val(value)); // requires haveSweepVar below
-    if (!haveSweepVar)
-      throw runtime_error("No VariedInput arg found to sweep over");
 
     out.res = slv.check();
     if (out.res != sat)
       return out;
     model m = slv.get_model();
-    out.alpha = eval_i64(m, alpha);
+    out.alpha = alphaCandidate;
     out.corrIndex = -1;
     out.out_correct.push_back(eval_i64(m, cv));
     out.out_faulty.push_back(eval_i64(m, fv));
@@ -436,7 +450,7 @@ static CorrectionResult check_value_correction(
     return out;
   }
 
-  // ---- Buffer output: existentially find which byte needs correction ----
+  // ---- Buffer output: correction pinned at the known fault index ----
   string ovC = resolve_index_var(correct_src, spec.outputIndexVar, false);
   string ovF = resolve_index_var(faulty_src, spec.outputIndexVar, true);
   expr outPtrC = ctx.int_const((ovC + "_C").c_str());
@@ -461,54 +475,18 @@ static CorrectionResult check_value_correction(
     return make_pair(select(finC, aC), select(finF, aF));
   };
 
-  bool knownIdx = spec.knownCorrectionIndex >= 0;
-
-  if (knownIdx) {
-    // ---- Fast path: only assert the correction at the one byte the
-    // fault touches. We deliberately do NOT assert anything about the
-    // other outputLength-1 bytes -- doing so requires Z3 to fully
-    // evaluate the whole nested store/bvxor chain at every position,
-    // which is what caused the earlier timeout, and it's unnecessary:
-    // those bytes are fed by the same (pinned-equal) inputs through
-    // structurally identical formulas in both traces, so they come out
-    // equal for free. We still read them back below, post-SAT, purely
-    // to sanity-check -- that costs nothing once a model exists.
-    long long idx = spec.knownCorrectionIndex;
-    auto [cv0, fv0] = selectAt(idx);
-    expr corrected = bv2int(int2bv(bits, fv0) ^ alphaBV, false);
-    slv.add(cv0 == corrected);
-  } else {
-    // ---- Fallback: existential search over which index needs
-    // correcting. Much slower -- expect to need this only if the fault
-    // site isn't known ahead of time.
-    expr corrIdx = ctx.int_const("corr_idx");
-    slv.add(corrIdx >= ctx.int_val(0));
-    slv.add(corrIdx < ctx.int_val((int)spec.outputLength));
-    for (long long i = 0; i < spec.outputLength; i++) {
-      auto [cv, fv] = selectAt(i);
-      expr corrected = bv2int(int2bv(bits, fv) ^ alphaBV, false);
-      expr isTarget = (corrIdx == ctx.int_val((int)i));
-      slv.add(ite(isTarget, cv == corrected, cv == fv));
-    }
-    out.corrIndex = -2; // placeholder; overwritten from model below if SAT
-  }
-
-  if (!haveSweepVar)
-    throw runtime_error("No VariedInput arg found to sweep over");
-  slv.add(sweepVar == ctx.int_val(value));
+  long long idx = spec.knownCorrectionIndex;
+  auto [cv0, fv0] = selectAt(idx);
+  expr corrected = bv2int(int2bv(bits, fv0) ^ alphaBV, false);
+  slv.add(cv0 == corrected);
 
   out.res = slv.check();
   if (out.res != sat)
     return out;
 
   model m = slv.get_model();
-  out.alpha = eval_i64(m, alpha);
-  if (knownIdx) {
-    out.corrIndex = spec.knownCorrectionIndex;
-  } else {
-    expr corrIdx = ctx.int_const("corr_idx");
-    out.corrIndex = eval_i64(m, corrIdx);
-  }
+  out.alpha = alphaCandidate;
+  out.corrIndex = idx;
 
   for (auto &pb : buffers) {
     const ArgSpec &a = *pb.spec;
@@ -559,6 +537,15 @@ int main(int argc, char **argv) {
   string faulty_path = faultyCandidates.front();
 
   FunctionSpec spec = get_function_spec(fn);
+  if (!spec.isScalarOutput && spec.knownCorrectionIndex < 0)
+    throw runtime_error(
+        "correction_query requires spec.knownCorrectionIndex to be set "
+        "for buffer outputs (the byte the fault touches must be known)");
+  if (spec.variedTestValue < 0)
+    throw runtime_error(
+        "correction_query requires spec.variedTestValue to be set -- "
+        "brute-forcing alpha against a free/unconstrained input is "
+        "meaningless (every alpha would look correctable)");
 
   string correct_src =
       strip_bad_asserts(strip_last_assert(read_file(correct_path)));
@@ -575,14 +562,27 @@ int main(int argc, char **argv) {
   string INITIAL_VERSION_FAULTY = find_initial_version(
       faulty_src, GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY);
 
-  // Only two files needed: one correct trace, one faulty trace.
+  // Only two files needed: one correct trace, one faulty trace. Written
+  // once, single-threaded, before any threads start -- every thread
+  // re-parses the same two files into its own context.
   string c = write_suffixed(correct_src, "C", fn_path);
   string f = write_suffixed(faulty_src, "F", fn_path);
 
-  vector<CorrectionResult> results(16);
+  int numCandidates = (int)spec.fieldSize;
+  cout << "Brute-forcing alpha in F_" << spec.fieldSize
+       << " across " << numCandidates
+       << " threads, against ONE fixed scenario (variedTestValue = "
+       << spec.variedTestValue << ")\n";
+
+  // ---- Spawn one thread per alpha candidate 0..fieldSize-1, each with
+  //      its own z3::context. Each thread writes to its own index of
+  //      `results`, so no mutex is needed -- only the final
+  //      aggregation/printing runs single-threaded again after every
+  //      thread has joined. ----
+  vector<CorrectionResult> results(numCandidates);
   vector<std::thread> threads;
-  threads.reserve(16);
-  for (int v = 0; v < 1; v++) {
+  threads.reserve(numCandidates);
+  for (int v = 0; v < numCandidates; v++) {
     threads.emplace_back([&, v]() {
       results[v] = check_value_correction(
           v, spec, c, f, correct_src, faulty_src, GLOBAL_BASE_CORRECT,
@@ -603,23 +603,23 @@ int main(int argc, char **argv) {
       unknownValues.push_back(r.value);
   }
 
-  cout << "SAT (correctable) for values:";
+  cout << "SAT (correct alpha found) for candidates:";
   for (int v : satValues)
     cout << " " << v;
   cout << "\n";
-  cout << "UNSAT (not correctable via single-byte XOR) for values:";
+  cout << "UNSAT for candidates:";
   for (int v : unsatValues)
     cout << " " << v;
   cout << "\n";
   if (!unknownValues.empty()) {
-    cout << "UNKNOWN/TIMEOUT for values:";
+    cout << "UNKNOWN/TIMEOUT for candidates:";
     for (int v : unknownValues)
       cout << " " << v;
     cout << "\n";
   }
 
   if (satValues.empty()) {
-    cout << "[!] No SAT value found; no witness exported.\n";
+    cout << "[!] No SAT alpha found; no witness exported.\n";
     return 0;
   }
 
@@ -632,7 +632,7 @@ int main(int argc, char **argv) {
   wj << "{\n";
   wj << "  \"function\": \"" << fn << "\",\n";
   wj << "  \"field_size\": " << spec.fieldSize << ",\n";
-  wj << "  \"sat_values\": "
+  wj << "  \"sat_alpha_candidates\": "
      << json_arr(vector<long long>(satValues.begin(), satValues.end()))
      << ",\n";
   wj << "  \"trials\": [\n";
@@ -643,7 +643,7 @@ int main(int argc, char **argv) {
       continue;
 
     wj << (firstTrial ? "    {\n" : ",\n    {\n");
-    wj << "      \"sweep_value\": " << r.value << ",\n";
+    wj << "      \"alpha_candidate\": " << r.value << ",\n";
     wj << "      \"correction\": {\n";
     if (r.corrIndex >= 0)
       wj << "        \"index\": " << r.corrIndex << ",\n";
