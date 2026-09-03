@@ -564,6 +564,34 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
           ptr = builder.CreateBitCast(newAlloc, argTy);
           errs() << "  Arg " << i << " (" << arg->getName()
                  << "): global of type " << *valTy << " named " << name << "\n";
+        } else if (auto *CI = dyn_cast<CallInst>(root)) {
+          // NEW: recognize calloc/malloc as an authoritative size source
+          // instead of silently discarding it and falling through to
+          // the generic 128-byte-default scanner.
+          if (auto sizeOpt = inferAllocCallByteSize(CI)) {
+            uint64_t byteSize = *sizeOpt;
+            std::string name = "heap_" + std::to_string(byteSize);
+            ArrayType *arrTy = ArrayType::get(Type::getInt8Ty(ctx), byteSize);
+            AllocaInst *newAlloc = builder.CreateAlloca(arrTy, nullptr, name);
+            MDNode *N = MDNode::get(ctx, MDString::get(ctx, name));
+            newAlloc->setAlignment(Align(16));
+            newAlloc->setMetadata("llvmbmc.var", N);
+            allocSize = byteSize;
+
+            zeroFillThenStoreU64(builder, ctx, newAlloc, allocSize, doStore,
+                                 jsonVal);
+
+            ptr = builder.CreateBitCast(newAlloc, argTy);
+            errs() << "  Arg " << i << " (" << arg->getName()
+                   << "): traced to heap allocation ("
+                   << CI->getCalledFunction()->getName() << ") of " << byteSize
+                   << " bytes\n";
+          }
+          // if sizeOpt is nullopt (non-constant size, or an allocator
+          // this doesn't recognize), `ptr` stays null and falls through
+          // to the existing ``if (!ptr) { ...inferPointerAllocSize... }``
+          // fallback below, same as before -- no behavior change for
+          // cases this new branch can't confidently resolve.
         }
       }
 
