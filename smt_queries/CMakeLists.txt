@@ -13,7 +13,7 @@ if(NOT Z3_FOUND)
   endif()
 endif()
 
-add_executable(ineffective_query ineffective_fault/ineffective_query.cpp)
+add_executable(ineffective_query ineffective_fault/ineffective_multi_query.cpp)
 
 target_link_libraries(ineffective_query
   PRIVATE
@@ -26,7 +26,7 @@ target_include_directories(ineffective_query
 )
 
 
-add_executable(correction_query correction_fault/correction_query.cpp)
+add_executable(correction_query correction_fault/correction_multi_query.cpp)
 
 target_link_libraries(correction_query
   PRIVATE

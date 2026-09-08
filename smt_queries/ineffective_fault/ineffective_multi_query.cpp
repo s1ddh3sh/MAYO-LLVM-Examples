@@ -1,14 +1,18 @@
 #include "z3++.h"
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace z3;
@@ -35,7 +39,7 @@ static long long eval_i64(model &m, const expr &e) {
   return m.eval(e, true).simplify().get_numeral_int64();
 }
 
-string read_file(const string &filename) {
+static string read_file(const string &filename) {
   ifstream ifs(filename);
   if (!ifs) {
     cerr << "Cannot open: " << filename << "\n";
@@ -44,7 +48,6 @@ string read_file(const string &filename) {
   return string((istreambuf_iterator<char>(ifs)), istreambuf_iterator<char>());
 }
 
-// Find the index of the ')' matching the '(' at position `open`.
 static size_t match_paren(const string &s, size_t open) {
   int depth = 0;
   for (size_t i = open; i < s.size(); i++) {
@@ -59,15 +62,29 @@ static size_t match_paren(const string &s, size_t open) {
   return string::npos;
 }
 
-string strip_bad_asserts(const string &src) {
+static string strip_bad_asserts(const string &src) {
   regex bad_assert(R"(\(assert\s+and\s*\)\s*)");
   return regex_replace(src, bad_assert, "");
 }
 
-string write_suffixed(const string &content, const string &tag,
-                      const string &outDir) {
+static string strip_last_assert(const string &src) {
+  size_t pos = src.rfind("(assert");
+  if (pos == string::npos)
+    return src;
+  size_t end = match_paren(src, pos);
+  if (end == string::npos)
+    return src;
+  return src.substr(0, pos) + src.substr(end + 1);
+}
+
+// NOTE the trailing `*` (was `+`): llvmbmc emits anonymous temporaries named
+// `i_7_`, `i_12_`, ... with nothing after the final underscore. With `+`
+// those names were left UNSUFFIXED, so the C1/F1/C2/F2 copies collapsed onto
+// the same Z3 constant and were silently forced equal across executions.
+static string write_suffixed(const string &content, const string &tag,
+                             const string &outDir) {
   string result = content;
-  regex ident(R"(\b((?:i|c|b)_\d+_[A-Za-z0-9_.]+)\b)");
+  regex ident(R"(\b((?:i|c|b)_\d+_[A-Za-z0-9_.]*)\b)");
   result = regex_replace(result, ident, "$1_" + tag);
 
   string path = outDir + "/" + tag + ".smt2";
@@ -80,107 +97,144 @@ string write_suffixed(const string &content, const string &tag,
   return path;
 }
 
-static void assert_no_overlap(solver &slv, context &ctx, expr startA,
-                              long long lenA, expr startB, long long lenB) {
-  expr endA = startA + ctx.int_val((int)lenA);
-  expr endB = startB + ctx.int_val((int)lenB);
-  slv.add(endA <= startB || endB <= startA);
+// llvmbmc's SMT-LIB printer emits some intermediates as anonymous integer
+// temporaries -- `(declare-fun i_7_ () Int)` with nothing after the final
+// underscore -- and never writes a defining equation for them anywhere in
+// the file. In lincomb these appear exactly as `(* i_42_ (select mem addr))`
+// inside a conditional-XOR chain: the standard "multiply by one bit of the
+// GF(16) multiplier, else 0" idiom from schoolbook double-and-add
+// multiplication. Bounding them to {0,1} is an ASSUMPTION about their
+// meaning, stated explicitly and printed at runtime -- if wrong for a given
+// function, its results should be treated as unverified until the upstream
+// trace emits real defining equations for these temporaries.
+static vector<string> find_anonymous_int_temps(const string &src) {
+  static const regex re(R"(\(declare-fun\s+(i_\d+_)\s+\(\)\s+Int\))");
+  vector<string> out;
+  for (auto it = sregex_iterator(src.begin(), src.end(), re),
+            e = sregex_iterator();
+       it != e; ++it)
+    out.push_back((*it)[1].str());
+  return out;
 }
 
-static string find_initial_version(const string &src, const string &base,
-                                   const string &finalVersion) {
-  string current = finalVersion;
-  static const regex numRe(R"(c_(\d+)$)");
-  while (true) {
-    string target = current + "_" + base;
-    size_t defPos = src.find("(= " + target);
-    if (defPos == string::npos)
-      return current;
-    size_t assertStart = src.rfind("(assert", defPos);
-    if (assertStart == string::npos)
-      return current;
+// =====================================================================
+// Memory layout, parsed from the trace's own comments.
+// =====================================================================
 
-    string head = src.substr(assertStart, defPos - assertStart);
-    if (head.find("(and (=>") != string::npos)
-      return current; // guarded -- this is the true initial version
+struct MemRegion {
+  string name;
+  long long start = 0;
+  long long end = 0; // inclusive
+  long long size() const { return end - start + 1; }
+};
 
-    size_t end = match_paren(src, assertStart);
-    if (end == string::npos)
-      return current;
-    string block = src.substr(assertStart, end - assertStart + 1);
+struct MemoryLayout {
+  map<string, MemRegion> regions;
+  vector<string> order;
+  string initialMem;
+  string finalMem;
+};
 
-    smatch m;
-    if (!regex_search(current, m, numRe))
-      return current;
-    int n = stoi(m[1].str());
-    string predName = "c_" + to_string(n - 1);
-    if (block.find(predName) == string::npos)
-      return current;
-    current = predName;
+static string parse_tagged_symbol(const string &src, const string &tag) {
+  regex re(";;\\s*" + tag + "\\s+([A-Za-z0-9_.]+)");
+  smatch m;
+  if (!regex_search(src, m, re))
+    throw runtime_error("Could not find ';; " + tag +
+                        " <symbol>' comment in trace");
+  return m[1].str();
+}
+
+static MemoryLayout parse_layout(const string &src) {
+  MemoryLayout L;
+
+  static const regex re(
+      R"(;;\s*Array\s+([A-Za-z_][A-Za-z0-9_.]*)\s+(-?\d+)\s+(-?\d+))");
+
+  for (auto it = sregex_iterator(src.begin(), src.end(), re),
+            e = sregex_iterator();
+       it != e; ++it) {
+    MemRegion r;
+    r.name = (*it)[1].str();
+    r.start = stoll((*it)[2].str());
+    r.end = stoll((*it)[3].str());
+
+    if (r.end < r.start)
+      throw runtime_error("Malformed region for '" + r.name + "'");
+
+    if (!L.regions.count(r.name))
+      L.order.push_back(r.name);
+
+    L.regions[r.name] = r;
+  }
+
+  if (L.regions.empty())
+    throw runtime_error("No ';; Array <name> <start> <end>' comments found");
+
+  L.finalMem = parse_tagged_symbol(src, "Final_Memory");
+  return L;
+}
+
+// Find the memory SSA arrays that the scalar return anchor actually reads.
+static vector<string> find_anchor_read_memories(const string &src,
+                                                const string &anchorSym) {
+  size_t defPos = src.rfind("(= " + anchorSym);
+  if (defPos == string::npos)
+    throw runtime_error("Could not find the defining assert for '" +
+                        anchorSym + "'");
+
+  size_t assertStart = src.rfind("(assert", defPos);
+  if (assertStart == string::npos)
+    throw runtime_error("Malformed assert around '" + anchorSym + "'");
+
+  size_t end = match_paren(src, assertStart);
+  if (end == string::npos)
+    throw runtime_error("Unbalanced assert around '" + anchorSym + "'");
+
+  string block = src.substr(assertStart, end - assertStart + 1);
+
+  static const regex selectMem(R"(\(select\s+(c_\d+_[A-Za-z0-9_.]+)\s+)");
+
+  vector<string> result;
+  set<string> seen;
+
+  for (auto it = sregex_iterator(block.begin(), block.end(), selectMem),
+            e = sregex_iterator();
+       it != e; ++it) {
+    string mem = (*it)[1].str();
+    if (seen.insert(mem).second)
+      result.push_back(mem);
+  }
+
+  if (result.empty())
+    throw runtime_error("Scalar anchor '" + anchorSym +
+                        "' contains no select(memory, address) reads");
+
+  return result;
+}
+
+static void check_layouts_match(const MemoryLayout &a, const MemoryLayout &b) {
+  if (a.regions.size() != b.regions.size())
+    throw runtime_error(
+        "correct/faulty traces declare different region counts");
+  for (auto &kv : a.regions) {
+    auto it = b.regions.find(kv.first);
+    if (it == b.regions.end())
+      throw runtime_error("Region '" + kv.first +
+                          "' missing from faulty trace");
+    if (it->second.start != kv.second.start || it->second.end != kv.second.end)
+      throw runtime_error("Region '" + kv.first +
+                          "' has different bounds in correct vs faulty trace");
   }
 }
 
-// Unconditionally deletes the last top-level (assert ...), regardless of
-// its content -- llvmbmc's own final safety-check assert, never needed
-// (buffer outputs read Global_M directly; scalar outputs read the
-// __mbc_ret_anchor_<fn> anchor). Always delete it rather than interpret
-// it, so it can never sneak in as a hard constraint.
-static string strip_last_assert(const string &src) {
-  size_t pos = src.rfind("(assert");
-  if (pos == string::npos)
-    return src;
-  size_t end = match_paren(src, pos);
-  if (end == string::npos)
-    return src;
-  return src.substr(0, pos) + src.substr(end + 1);
-}
-
-// =====================================================================
-// Function I/O specification
-// =====================================================================
-
-enum class ArgKind { Scalar, Buffer };
-enum class ArgRole { FixedInput, VariedInput };
-
-struct ArgSpec {
-  string name;
-  ArgKind kind;
-  ArgRole role;
-  string indexVar;
-  long long offset = 0;
-  long long length = 0;
-  long long fixedValue = 11;
-};
-
-struct FunctionSpec {
-  string fnName;
-  vector<ArgSpec> args;
-
-  bool isScalarOutput = true;
-  string outputAnchorName;    // Scalar only
-  string outputIndexVar;      // Buffer only
-  long long outputOffset = 0; // Buffer only
-  long long outputLength = 1; // Buffer only
-  string outputLabel;
-};
-
-// A Buffer arg's pointer, pinned equal across correct/faulty and trials
-// 1/2, plus its region-start address (used for non-overlap).
-struct PinnedBuffer {
-  const ArgSpec *spec;
-  expr pC1, pF1, pC2, pF2;
-  expr startC1;
-};
-
-static string resolve_index_var(const string &src, const string &base,
-                                bool faulty) {
-  string suffix = faulty ? "_faulty" : "_correct";
-  regex re("i_(\\d+)_" + base + suffix);
-  smatch m;
-  if (regex_search(src, m, re))
-    return m[0].str();
-  throw runtime_error("Could not resolve index var for '" + base +
-                      "' (looked for i_<N>_" + base + suffix + ")");
+static void print_layout(const MemoryLayout &L, const string &which) {
+  cout << "[layout:" << which << "] initial=" << L.initialMem
+       << " final=" << L.finalMem << "\n";
+  for (auto &n : L.order) {
+    const MemRegion &r = L.regions.at(n);
+    cout << "    " << n << " [" << r.start << ".." << r.end << "] (" << r.size()
+         << " bytes)\n";
+  }
 }
 
 static string resolve_final_ssa_symbol(const string &src, const string &base,
@@ -204,57 +258,456 @@ static string resolve_final_ssa_symbol(const string &src, const string &base,
   return best;
 }
 
-static FunctionSpec get_function_spec(const string &fn) {
-  if (fn == "mat_add") {
-    FunctionSpec spec;
-    spec.fnName = "mat_add";
-    spec.args = {
-        {"Vdec", ArgKind::Buffer, ArgRole::FixedInput, "Vdec", 1719, 78, 1},
-        {"Ox", ArgKind::Buffer, ArgRole::VariedInput, "Ox", 1719, 78},
-    };
-    spec.isScalarOutput = false;
-    spec.outputIndexVar = "s";
-    spec.outputOffset = 858;
-    spec.outputLength = 78;
-    return spec;
+static bool trace_pinned_scalar(const string &src, const string &base,
+                                bool faulty, long long &out) {
+  string suffix = faulty ? "_faulty" : "_correct";
+  regex re("\\(assert\\s*\\(=\\s*i_\\d+_" + base + suffix +
+           "\\s+(-?\\d+)\\)\\)");
+  smatch m;
+  if (!regex_search(src, m, re))
+    return false;
+  out = stoll(m[1].str());
+  return true;
+}
+
+// =====================================================================
+// Detect a faulty trace that is IDENTICAL to the correct trace once its SSA
+// labelling is normalized away.
+// =====================================================================
+
+static string normalize_trace_labels(const string &src, bool faulty) {
+  string suffix = faulty ? "_faulty" : "_correct";
+  string memName = faulty ? "Global_M_faulty" : "Global_M_correct";
+  string out;
+  out.reserve(src.size());
+
+  size_t pos = 0;
+  while (pos < src.size()) {
+    size_t p1 = src.find(memName, pos);
+    size_t p2 = src.find(suffix, pos);
+    size_t p = min(p1, p2);
+    if (p == string::npos) {
+      out += src.substr(pos);
+      break;
+    }
+    out += src.substr(pos, p - pos);
+    if (p == p1) {
+      out += "Global_M_X";
+      pos = p + memName.size();
+    } else {
+      out += "_X";
+      pos = p + suffix.size();
+    }
   }
-  if (fn == "m_vec_add") {
-    FunctionSpec spec;
-    spec.fnName = "m_vec_add";
-    spec.args = {
-        {"pk", ArgKind::Buffer, ArgRole::VariedInput, "pk", 0, 8},
-        {"accumulator", ArgKind::Buffer, ArgRole::FixedInput, "pk", 0, 8},
-    };
-    spec.isScalarOutput = false;
-    spec.outputIndexVar = "accumulator";
-    spec.outputOffset = 18705;
-    spec.outputLength = 1;
-    return spec;
+  return out;
+}
+
+static bool traces_structurally_identical(const string &correct_src,
+                                          const string &faulty_src) {
+  return normalize_trace_labels(correct_src, false) ==
+         normalize_trace_labels(faulty_src, true);
+}
+
+// =====================================================================
+// Minimal flat-JSON reader. Insertion order is PRESERVED.
+// =====================================================================
+
+struct JsonValue {
+  bool isString = false;
+  string s;
+  long long i = 0;
+};
+using JsonObj = vector<pair<string, JsonValue>>;
+
+static const JsonValue *json_find(const JsonObj &o, const string &key) {
+  for (auto &kv : o)
+    if (kv.first == key)
+      return &kv.second;
+  return nullptr;
+}
+
+static JsonObj parse_flat_json(const string &text) {
+  JsonObj out;
+  size_t i = 0;
+  auto skipws = [&] {
+    while (i < text.size() && isspace((unsigned char)text[i]))
+      i++;
+  };
+
+  skipws();
+  if (i >= text.size() || text[i] != '{')
+    throw runtime_error("JSON: expected '{'");
+  i++;
+  skipws();
+  if (i < text.size() && text[i] == '}')
+    return out;
+
+  while (true) {
+    skipws();
+    if (i >= text.size() || text[i] != '"')
+      throw runtime_error("JSON: expected a quoted key");
+    size_t e = text.find('"', i + 1);
+    if (e == string::npos)
+      throw runtime_error("JSON: unterminated key");
+    string key = text.substr(i + 1, e - i - 1);
+    i = e + 1;
+
+    skipws();
+    if (i >= text.size() || text[i] != ':')
+      throw runtime_error("JSON: expected ':' after key '" + key + "'");
+    i++;
+    skipws();
+
+    JsonValue v;
+    if (i < text.size() && text[i] == '"') {
+      size_t se = text.find('"', i + 1);
+      if (se == string::npos)
+        throw runtime_error("JSON: unterminated string for key '" + key + "'");
+      v.isString = true;
+      v.s = text.substr(i + 1, se - i - 1);
+      i = se + 1;
+    } else {
+      size_t st = i;
+      if (i < text.size() && (text[i] == '-' || text[i] == '+'))
+        i++;
+      while (i < text.size() && isdigit((unsigned char)text[i]))
+        i++;
+      if (st == i)
+        throw runtime_error("JSON: expected a number or string for key '" +
+                            key + "'");
+      v.isString = false;
+      v.s = text.substr(st, i - st);
+      v.i = stoll(v.s);
+    }
+    out.push_back({key, v});
+
+    skipws();
+    if (i < text.size() && text[i] == ',') {
+      i++;
+      continue;
+    }
+    if (i < text.size() && text[i] == '}')
+      break;
+    throw runtime_error("JSON: expected ',' or '}'");
   }
-  if (fn == "lincomb") {
-    FunctionSpec spec;
-    spec.fnName = "lincomb";
-    spec.args = {
-        {"a_buf", ArgKind::Buffer, ArgRole::FixedInput, "a_buf", 0, 8, 11},
-        {"x", ArgKind::Buffer, ArgRole::VariedInput, "x", 0, 8},
-    };
-    spec.isScalarOutput = true;
-    spec.outputAnchorName = "__mbc_ret_anchor_lincomb";
-    return spec;
+  return out;
+}
+
+// =====================================================================
+// Parameter <-> region mapping.
+// =====================================================================
+
+struct ArgMap {
+  map<string, string> paramToRegion;
+  map<string, string> regionToParam;
+  map<string, long long> activeLen;
+};
+
+static bool is_internal_region(const string &name, const string &fn,
+                               const string &src) {
+  if (name == "__mbc_ret_anchor_" + fn)
+    return true;
+  if (name.rfind("__mbc_arg_", 0) == 0)
+    return true;
+  long long dummy;
+  return trace_pinned_scalar(src, name, false, dummy);
+}
+
+static ArgMap build_arg_map(const string &fn, const string &activePath,
+                            const MemoryLayout &L, const string &src,
+                            const string &outputRegionExclude) {
+  ArgMap M;
+
+  vector<string> bufferRegions;
+  for (auto &n : L.order)
+    if (!is_internal_region(n, fn, src) && n != outputRegionExclude)
+      bufferRegions.push_back(n);
+
+  if (!fs::exists(activePath)) {
+    cout << "[note] no " << activePath
+         << " -- using region names as-is and full region lengths\n";
+    for (auto &n : bufferRegions) {
+      M.paramToRegion[n] = n;
+      M.regionToParam[n] = n;
+    }
+    return M;
   }
-  throw runtime_error("No FunctionSpec registered for '" + fn + "'");
+
+  JsonObj act = parse_flat_json(read_file(activePath));
+
+  vector<pair<string, long long>> bufferParams;
+  for (auto &kv : act) {
+    if (kv.second.isString)
+      throw runtime_error("active_lengths: '" + kv.first +
+                          "' must be an integer");
+    long long dummy;
+    bool isScalar = L.regions.count("__mbc_arg_" + fn + "_" + kv.first) ||
+                    trace_pinned_scalar(src, "__mbc_arg_" + fn + "_" + kv.first,
+                                        false, dummy);
+    if (isScalar) {
+      M.paramToRegion[kv.first] = "__mbc_arg_" + fn + "_" + kv.first;
+      continue;
+    }
+    bufferParams.push_back({kv.first, kv.second.i});
+  }
+
+  if (bufferParams.size() != bufferRegions.size()) {
+    string ps, rs;
+    for (auto &p : bufferParams)
+      ps += " " + p.first;
+    for (auto &r : bufferRegions)
+      rs += " " + r;
+    throw runtime_error(
+        "Cannot match parameters to regions positionally: " + activePath +
+        " has " + to_string(bufferParams.size()) + " buffer parameter(s) (" +
+        ps + " ) but the trace declares " + to_string(bufferRegions.size()) +
+        " buffer region(s) (" + rs + " )");
+  }
+
+  for (size_t i = 0; i < bufferParams.size(); i++) {
+    const string &param = bufferParams[i].first;
+    const string &region = bufferRegions[i];
+    M.paramToRegion[param] = region;
+    M.regionToParam[region] = param;
+    long long len = bufferParams[i].second;
+    const MemRegion &r = L.regions.at(region);
+    if (len <= 0 || len > r.size())
+      throw runtime_error("Active length " + to_string(len) + " for '" + param +
+                          "' does not fit region '" + region + "' (" +
+                          to_string(r.size()) + " bytes)");
+    M.activeLen[region] = len;
+    cout << "[map] " << param << " -> " << region << " (" << len
+         << " active bytes of " << r.size() << ")\n";
+  }
+  return M;
+}
+
+// =====================================================================
+// Function spec
+// =====================================================================
+
+enum class ArgRole { FixedInput, VariedInput };
+
+struct ResolvedArg {
+  string name;
+  string param;
+  ArgRole role;
+  long long start = 0;
+  long long length = 0;
+  long long fillValue = 0;
+};
+
+struct ResolvedOutput {
+  bool scalar = true;
+  string label;
+  string anchorName;
+  long long start = 0;
+  long long length = 1;
+  long long compareIndex = 0;
+  bool hasExpected = false;
+  long long expected = 0;
+};
+
+struct FunctionSpec {
+  string fnName;
+  vector<ResolvedArg> args;
+  ResolvedOutput out;
+  long long fieldSize = 16;
+  bool hasVaried = false;
+};
+
+static string resolve_region_name(const string &key, const ArgMap &M,
+                                  const MemoryLayout &L) {
+  auto it = M.paramToRegion.find(key);
+  if (it != M.paramToRegion.end())
+    return it->second;
+  if (L.regions.count(key))
+    return key;
+  return "";
+}
+
+static FunctionSpec load_function_spec(const string &fn, const string &jsonPath,
+                                       const MemoryLayout &L,
+                                       const string &correct_src,
+                                       const ArgMap &M,
+                                       const string &variedOverride) {
+  JsonObj j = parse_flat_json(read_file(jsonPath));
+
+  FunctionSpec spec;
+  spec.fnName = fn;
+  const string anchorRegion = "__mbc_ret_anchor_" + fn;
+
+  auto getStr = [&](const string &k, string &dst) {
+    const JsonValue *v = json_find(j, k);
+    if (!v)
+      return false;
+    if (!v->isString)
+      throw runtime_error("JSON key '" + k + "' must be a string");
+    dst = v->s;
+    return true;
+  };
+  auto getInt = [&](const string &k, long long &dst) {
+    const JsonValue *v = json_find(j, k);
+    if (!v)
+      return false;
+    if (v->isString)
+      throw runtime_error("JSON key '" + k + "' must be an integer");
+    dst = v->i;
+    return true;
+  };
+
+  string outputName;
+  if (!getStr("output", outputName))
+    throw runtime_error("function_inputs JSON must contain \"output\"");
+
+  string variedName;
+  spec.hasVaried = getStr("varied", variedName);
+  if (!variedOverride.empty()) {
+    if (spec.hasVaried && variedName != variedOverride)
+      cout << "[note] varying '" << variedOverride
+           << "' from the command line, overriding \"varied\":\"" << variedName
+           << "\"\n";
+    variedName = variedOverride;
+    spec.hasVaried = true;
+  }
+  string variedRegion =
+      spec.hasVaried ? resolve_region_name(variedName, M, L) : "";
+
+  long long clampLength = 0;
+  getInt("length", clampLength);
+  getInt("q", spec.fieldSize);
+  if (spec.fieldSize < 2)
+    throw runtime_error("Field size q must be >= 2");
+
+  long long compareIndex = 0;
+  getInt("index", compareIndex);
+
+  auto lengthFor = [&](const string &region) {
+    const MemRegion &r = L.regions.at(region);
+    if (clampLength > 0)
+      return min(clampLength, r.size());
+    auto it = M.activeLen.find(region);
+    if (it != M.activeLen.end())
+      return it->second;
+    return r.size();
+  };
+
+  string outRegion = resolve_region_name(outputName, M, L);
+  spec.out.label = outputName;
+  spec.out.compareIndex = compareIndex;
+  bool outIsAnchor = outRegion.empty() || outRegion == anchorRegion;
+  if (outIsAnchor) {
+    spec.out.scalar = true;
+    spec.out.anchorName = anchorRegion;
+    spec.out.length = 1;
+    spec.out.compareIndex = 0;
+  } else {
+    const MemRegion &r = L.regions.at(outRegion);
+    spec.out.scalar = false;
+    spec.out.start = r.start;
+    spec.out.length = lengthFor(outRegion);
+  }
+  {
+    const JsonValue *v = json_find(j, outputName);
+    if (v && !v->isString) {
+      spec.out.hasExpected = true;
+      spec.out.expected = v->i;
+    }
+  }
+  if (spec.out.compareIndex < 0 || spec.out.compareIndex >= spec.out.length)
+    throw runtime_error("\"index\" out of range for output '" + outputName +
+                        "'");
+  if (spec.hasVaried && !outIsAnchor && variedRegion == outRegion)
+    throw runtime_error("Cannot vary '" + variedName + "' -- it is the output");
+
+  static const vector<string> reserved = {"output", "varied", "length", "index",
+                                          "q"};
+  bool sawVaried = false;
+  for (auto &kv : j) {
+    const string &key = kv.first;
+    if (find(reserved.begin(), reserved.end(), key) != reserved.end())
+      continue;
+    if (key == outputName || key == anchorRegion)
+      continue;
+
+    long long fromTrace = 0;
+    string scalarBase;
+    if (trace_pinned_scalar(correct_src, key, false, fromTrace))
+      scalarBase = key;
+    else if (trace_pinned_scalar(correct_src, "__mbc_arg_" + fn + "_" + key,
+                                 false, fromTrace))
+      scalarBase = "__mbc_arg_" + fn + "_" + key;
+    if (!scalarBase.empty()) {
+      if (!kv.second.isString && fromTrace != kv.second.i)
+        throw runtime_error("Scalar '" + key + "' is " +
+                            to_string(kv.second.i) + " in " + jsonPath +
+                            " but " + to_string(fromTrace) +
+                            " in the trace -- stale function_inputs file?");
+      cout << "[scalar] " << key << " = " << fromTrace << " (pinned as "
+           << scalarBase << ")\n";
+      continue;
+    }
+
+    string region = resolve_region_name(key, M, L);
+    if (!region.empty()) {
+      if (kv.second.isString)
+        throw runtime_error("Input '" + key + "' must have an integer value");
+      const MemRegion &r = L.regions.at(region);
+      ResolvedArg a;
+      a.name = region;
+      auto pit = M.regionToParam.find(region);
+      a.param = pit != M.regionToParam.end() ? pit->second : region;
+      a.role = (spec.hasVaried && region == variedRegion) ? ArgRole::VariedInput
+                                                          : ArgRole::FixedInput;
+      if (a.role == ArgRole::VariedInput)
+        sawVaried = true;
+      a.start = r.start;
+      a.length = lengthFor(region);
+      a.fillValue = kv.second.i;
+      spec.args.push_back(a);
+      continue;
+    }
+
+    string known;
+    for (auto &n : L.order)
+      known += " " + n;
+    throw runtime_error("JSON key '" + key +
+                        "' is neither a trace-pinned scalar nor a known "
+                        "parameter/region. Regions:" +
+                        known);
+  }
+
+  if (spec.hasVaried && !sawVaried) {
+    string inputs;
+    for (auto &a : spec.args)
+      inputs += " " + a.param + "(" + a.name + ")";
+    throw runtime_error("'" + variedName +
+                        "' does not name an input. Inputs:" + inputs);
+  }
+  if (spec.args.empty())
+    throw runtime_error("No input regions found in " + jsonPath);
+
+  std::sort(spec.args.begin(), spec.args.end(),
+            [](const ResolvedArg &a, const ResolvedArg &b) {
+              return a.start < b.start;
+            });
+  for (size_t i = 0; i + 1 < spec.args.size(); i++)
+    if (spec.args[i].start + spec.args[i].length > spec.args[i + 1].start)
+      throw runtime_error("Inputs '" + spec.args[i].name + "' and '" +
+                          spec.args[i + 1].name + "' overlap in memory");
+
+  return spec;
 }
 
 // =====================================================================
 // Per-value check, run in its own thread with its own z3::context.
 // z3::context/solver/expr are NOT safe to share across threads -- each
-// thread must build its own context, re-parse the four .smt2 files
-// (already written to disk once, single-threaded, before any threads
-// start), and rebuild every constraint from scratch. Everything that
-// needs to survive past the thread's lifetime gets copied out into
-// plain long long/string/vector fields on ValueResult -- no z3::expr
-// or z3::model may leak out, since those are tied to the thread's own
-// (about-to-be-destroyed) context.
+// thread builds its own context, re-parses the four .smt2 files (already
+// written to disk once, single-threaded, before any threads start), and
+// rebuilds every constraint from scratch. Everything that needs to
+// survive past the thread's lifetime gets copied out into plain
+// long long/string/vector fields on ValueResult -- no z3::expr or
+// z3::model leaks out.
 // =====================================================================
 
 struct FixedEntry {
@@ -275,13 +728,15 @@ struct ValueResult {
   vector<long long> out1_correct, out1_faulty, out2_correct, out2_faulty;
 };
 
-static ValueResult check_value(
-    int value, const FunctionSpec &spec, const string &c1, const string &f1,
-    const string &c2, const string &f2, const string &correct_src,
-    const string &faulty_src, const string &GLOBAL_BASE_CORRECT,
-    const string &GLOBAL_BASE_FAULTY, const string &FINAL_VERSION_CORRECT,
-    const string &FINAL_VERSION_FAULTY, const string &INITIAL_VERSION_CORRECT,
-    const string &INITIAL_VERSION_FAULTY) {
+static ValueResult check_value(int value, const FunctionSpec &spec,
+                               const string &c1, const string &f1,
+                               const string &c2, const string &f2,
+                               const vector<string> &inputMemC,
+                               const vector<string> &inputMemF,
+                               const string &anchC, const string &anchF,
+                               const string &finalMemC, const string &finalMemF,
+                               const vector<string> &anonC,
+                               const vector<string> &anonF) {
   ValueResult out;
   out.value = value;
 
@@ -295,7 +750,7 @@ static ValueResult check_value(
   solver slv = pipeline.mk_solver();
 
   params p(ctx);
-  p.set("timeout", 10000u); // 10 seconds per value
+  p.set("timeout", 20000u); // per value, in its own thread
   slv.set(p);
 
   expr_vector C1 = ctx.parse_file(c1.c_str());
@@ -311,124 +766,113 @@ static ValueResult check_value(
   for (expr e : F2)
     slv.add(e);
 
-  z3::sort arr_sort = ctx.array_sort(ctx.int_sort(), ctx.int_sort());
-  auto init_arr = [&](const string &base, const string &initVer,
-                      const string &tag) {
-    return ctx.constant((initVer + "_" + base + "_" + tag).c_str(), arr_sort);
-  };
-  expr initC1 = init_arr(GLOBAL_BASE_CORRECT, INITIAL_VERSION_CORRECT, "C1");
-  expr initF1 = init_arr(GLOBAL_BASE_FAULTY, INITIAL_VERSION_FAULTY, "F1");
-  expr initC2 = init_arr(GLOBAL_BASE_CORRECT, INITIAL_VERSION_CORRECT, "C2");
-  expr initF2 = init_arr(GLOBAL_BASE_FAULTY, INITIAL_VERSION_FAULTY, "F2");
-  slv.add(initC1 == initF1);
-  slv.add(initC2 == initF2);
-
-  vector<PinnedBuffer> buffers;
-  for (auto &a : spec.args) {
-    if (a.kind != ArgKind::Buffer)
-      continue;
-    string ivC = resolve_index_var(correct_src, a.indexVar, false);
-    string ivF = resolve_index_var(faulty_src, a.indexVar, true);
-    expr pC1 = ctx.int_const((ivC + "_C1").c_str());
-    expr pF1 = ctx.int_const((ivF + "_F1").c_str());
-    expr pC2 = ctx.int_const((ivC + "_C2").c_str());
-    expr pF2 = ctx.int_const((ivF + "_F2").c_str());
-    slv.add(pC1 == pF1);
-    slv.add(pC1 == pC2);
-    slv.add(pC1 == pF2);
-    expr startC1 = ctx.int_val((int)a.offset) + pC1;
-    buffers.push_back({&a, pC1, pF1, pC2, pF2, startC1});
+  for (auto &base : anonC) {
+    for (const char *tag : {"C1", "C2"}) {
+      expr v = ctx.int_const((base + "_" + tag).c_str());
+      slv.add(v >= ctx.int_val(0) && v <= ctx.int_val(1));
+    }
+  }
+  for (auto &base : anonF) {
+    for (const char *tag : {"F1", "F2"}) {
+      expr v = ctx.int_const((base + "_" + tag).c_str());
+      slv.add(v >= ctx.int_val(0) && v <= ctx.int_val(1));
+    }
   }
 
-  for (size_t i = 0; i < buffers.size(); i++)
-    for (size_t j = i + 1; j < buffers.size(); j++)
-      assert_no_overlap(slv, ctx, buffers[i].startC1, buffers[i].spec->length,
-                        buffers[j].startC1, buffers[j].spec->length);
+  z3::sort arr_sort = ctx.array_sort(ctx.int_sort(), ctx.int_sort());
+  auto mem = [&](const string &sym, const string &tag) {
+    return ctx.constant((sym + "_" + tag).c_str(), arr_sort);
+  };
+
+  vector<expr> inputC1, inputF1, inputC2, inputF2;
+  for (const string &sym : inputMemC) {
+    inputC1.push_back(mem(sym, "C1"));
+    inputC2.push_back(mem(sym, "C2"));
+  }
+  for (const string &sym : inputMemF) {
+    inputF1.push_back(mem(sym, "F1"));
+    inputF2.push_back(mem(sym, "F2"));
+  }
 
   expr sweepVar = ctx.int_val(0);
   bool haveSweepVar = false;
 
-  for (auto &pb : buffers) {
-    const ArgSpec &a = *pb.spec;
-    if (a.role == ArgRole::FixedInput) {
+  auto constrain_args = [&](const vector<expr> &mems, const string &execTag,
+                            bool isCorrectExecution) {
+    if (mems.empty())
+      throw runtime_error("No input memory selected for " + execTag);
+
+    for (auto &a : spec.args) {
       for (long long i = 0; i < a.length; i++) {
-        expr addr = ctx.int_val((int)(a.offset + i)) + pb.pC1;
-        expr vi = ctx.int_const((a.name + "_" + to_string(i)).c_str());
-        slv.add(select(initC1, addr) == vi);
-        slv.add(select(initC2, addr) == vi);
-        slv.add(vi == ctx.int_val((int)a.fixedValue));
-      }
-    } else { // VariedInput
-      for (long long i = 0; i < a.length; i++) {
-        expr addr = ctx.int_val((int)(a.offset + i)) + pb.pC1;
-        expr o1i = ctx.int_const((a.name + "_1_" + to_string(i)).c_str());
-        expr o2i = ctx.int_const((a.name + "_2_" + to_string(i)).c_str());
-        slv.add(select(initC1, addr) == o1i);
-        slv.add(select(initC2, addr) == o2i);
-        slv.add(o1i >= ctx.int_val(0));
-        slv.add(o1i < ctx.int_val(16));
-        slv.add(o2i >= ctx.int_val(0));
-        slv.add(o2i < ctx.int_val(16));
-        if (i == 0 && !haveSweepVar) {
-          sweepVar = o1i;
-          haveSweepVar = true;
+        expr addr = ctx.int_val((int)(a.start + i));
+
+        if (a.role == ArgRole::FixedInput) {
+          expr vi = ctx.int_const((a.name + "_" + to_string(i)).c_str());
+          for (const expr &mm : mems)
+            slv.add(select(mm, addr) == vi);
+          slv.add(vi == ctx.int_val((int)a.fillValue));
+        } else {
+          string suffix;
+          if (isCorrectExecution && execTag == "C1")
+            suffix = "_1_";
+          else if (isCorrectExecution && execTag == "C2")
+            suffix = "_2_";
+          else if (!isCorrectExecution && execTag == "F1")
+            suffix = "_F1_";
+          else
+            suffix = "_F2_";
+
+          expr oi = ctx.int_const((a.name + suffix + to_string(i)).c_str());
+          for (const expr &mm : mems)
+            slv.add(select(mm, addr) == oi);
+          slv.add(oi >= ctx.int_val(0));
+          slv.add(oi < ctx.int_val((int)spec.fieldSize));
+
+          if (isCorrectExecution && execTag == "C1" && i == 0 &&
+              !haveSweepVar) {
+            sweepVar = oi;
+            haveSweepVar = true;
+          } else {
+            slv.add(oi == ctx.int_val((int)a.fillValue));
+          }
         }
       }
     }
-  }
+  };
+
+  constrain_args(inputC1, "C1", true);
+  constrain_args(inputF1, "F1", false);
+  constrain_args(inputC2, "C2", true);
+  constrain_args(inputF2, "F2", false);
+
+  if (!haveSweepVar)
+    throw runtime_error("No VariedInput arg found to sweep over");
+
+  expr finC1 = mem(finalMemC, "C1");
+  expr finF1 = mem(finalMemF, "F1");
+  expr finC2 = mem(finalMemC, "C2");
+  expr finF2 = mem(finalMemF, "F2");
 
   expr c1v = ctx.int_val(0), f1v = ctx.int_val(0);
   expr c2v = ctx.int_val(0), f2v = ctx.int_val(0);
 
-  if (spec.isScalarOutput) {
-    string anchC =
-        resolve_final_ssa_symbol(correct_src, spec.outputAnchorName, false);
-    string anchF =
-        resolve_final_ssa_symbol(faulty_src, spec.outputAnchorName, true);
+  if (spec.out.scalar) {
     c1v = ctx.int_const((anchC + "_C1").c_str());
     f1v = ctx.int_const((anchF + "_F1").c_str());
     c2v = ctx.int_const((anchC + "_C2").c_str());
     f2v = ctx.int_const((anchF + "_F2").c_str());
   } else {
-    string ovC = resolve_index_var(correct_src, spec.outputIndexVar, false);
-    string ovF = resolve_index_var(faulty_src, spec.outputIndexVar, true);
-    expr outPtrC1 = ctx.int_const((ovC + "_C1").c_str());
-    // if (!spec.isScalarOutput) {
-    //   expr sC = ctx.int_const((ovC).c_str()); // or reuse outPtrC1 before offset
-    //   slv.add(outPtrC1 >= 0 && outPtrC1 < ctx.int_val((int)spec.outputLength));
-    // }
-    expr outPtrF1 = ctx.int_const((ovF + "_F1").c_str());
-    expr outPtrC2 = ctx.int_const((ovC + "_C2").c_str());
-    expr outPtrF2 = ctx.int_const((ovF + "_F2").c_str());
-    slv.add(outPtrC1 == outPtrF1);
-    slv.add(outPtrC1 == outPtrC2);
-    slv.add(outPtrC1 == outPtrF2);
-
-    auto final_arr = [&](const string &base, const string &finVer,
-                         const string &tag) {
-      return ctx.constant((finVer + "_" + base + "_" + tag).c_str(), arr_sort);
-    };
-    expr finC1 = final_arr(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C1");
-    expr finF1 = final_arr(GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY, "F1");
-    expr finC2 = final_arr(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C2");
-    expr finF2 = final_arr(GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY, "F2");
-
-    expr addrC1 = ctx.int_val((int)spec.outputOffset) + outPtrC1;
-    expr addrF1 = ctx.int_val((int)spec.outputOffset) + outPtrF1;
-    expr addrC2 = ctx.int_val((int)spec.outputOffset) + outPtrC2;
-    expr addrF2 = ctx.int_val((int)spec.outputOffset) + outPtrF2;
-
-    c1v = select(finC1, addrC1);
-    f1v = select(finF1, addrF1);
-    c2v = select(finC2, addrC2);
-    f2v = select(finF2, addrF2);
+    expr addr = ctx.int_val((int)(spec.out.start + spec.out.compareIndex));
+    c1v = select(finC1, addr);
+    f1v = select(finF1, addr);
+    c2v = select(finC2, addr);
+    f2v = select(finF2, addr);
   }
 
+  // Ineffective-fault condition: fault masked in trial 1.
   slv.add(c1v == f1v);
-  // slv.add(c2v != f2v);
+  // slv.add(c2v != f2v);   // ... and observable in trial 2
 
-  if (!haveSweepVar)
-    throw runtime_error("No VariedInput arg found to sweep over");
   slv.add(sweepVar == ctx.int_val(value));
 
   out.res = slv.check();
@@ -441,8 +885,7 @@ static ValueResult check_value(
   out.c2v = eval_i64(m, c2v);
   out.f2v = eval_i64(m, f2v);
 
-  for (auto &pb : buffers) {
-    const ArgSpec &a = *pb.spec;
+  for (auto &a : spec.args) {
     if (a.role == ArgRole::FixedInput) {
       FixedEntry fe{a.name, {}};
       for (long long i = 0; i < a.length; i++)
@@ -461,50 +904,63 @@ static ValueResult check_value(
     }
   }
 
-  if (spec.isScalarOutput) {
+  if (spec.out.scalar) {
     out.out1_correct.push_back(out.c1v);
     out.out1_faulty.push_back(out.f1v);
     out.out2_correct.push_back(out.c2v);
     out.out2_faulty.push_back(out.f2v);
   } else {
-    string ovC = resolve_index_var(correct_src, spec.outputIndexVar, false);
-    string ovF = resolve_index_var(faulty_src, spec.outputIndexVar, true);
-    expr outPtrC1 = ctx.int_const((ovC + "_C1").c_str());
-    expr outPtrF1 = ctx.int_const((ovF + "_F1").c_str());
-    expr outPtrC2 = ctx.int_const((ovC + "_C2").c_str());
-    expr outPtrF2 = ctx.int_const((ovF + "_F2").c_str());
-    auto final_arr2 = [&](const string &base, const string &finVer,
-                          const string &tag) {
-      return ctx.constant((finVer + "_" + base + "_" + tag).c_str(), arr_sort);
-    };
-    expr finC1b = final_arr2(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C1");
-    expr finF1b = final_arr2(GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY, "F1");
-    expr finC2b = final_arr2(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C2");
-    expr finF2b = final_arr2(GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY, "F2");
-    for (long long i = 0; i < spec.outputLength; i++) {
-      expr aC1 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrC1;
-      expr aF1 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrF1;
-      expr aC2 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrC2;
-      expr aF2 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrF2;
-      out.out1_correct.push_back(eval_i64(m, select(finC1b, aC1)));
-      out.out1_faulty.push_back(eval_i64(m, select(finF1b, aF1)));
-      out.out2_correct.push_back(eval_i64(m, select(finC2b, aC2)));
-      out.out2_faulty.push_back(eval_i64(m, select(finF2b, aF2)));
+    for (long long i = 0; i < spec.out.length; i++) {
+      expr a = ctx.int_val((int)(spec.out.start + i));
+      out.out1_correct.push_back(eval_i64(m, select(finC1, a)));
+      out.out1_faulty.push_back(eval_i64(m, select(finF1, a)));
+      out.out2_correct.push_back(eval_i64(m, select(finC2, a)));
+      out.out2_faulty.push_back(eval_i64(m, select(finF2, a)));
     }
   }
 
   return out;
 }
 
+static bool ends_with(const string &s, const string &suf) {
+  return s.size() >= suf.size() &&
+         s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
-    cerr << "Usage: ./differential_query <fnName>\n";
+    cerr << "Usage: ./ineffective_query <fnName> [variedInput] "
+            "[function_inputs.json]\n"
+            "  e.g. ./ineffective_query lincomb x\n";
     return 1;
   }
   string fn = argv[1];
+
+  string variedOverride, spec_path;
+  for (int i = 2; i < argc; i++) {
+    string a = argv[i];
+    if (ends_with(a, ".json") || a.find('/') != string::npos) {
+      if (!spec_path.empty()) {
+        cerr << "Two spec files given: " << spec_path << " and " << a << "\n";
+        return 1;
+      }
+      spec_path = a;
+    } else {
+      if (!variedOverride.empty()) {
+        cerr << "Only one input can be varied (got '" << variedOverride
+             << "' and '" << a << "')\n";
+        return 1;
+      }
+      variedOverride = a;
+    }
+  }
+  if (spec_path.empty())
+    spec_path = "../../function_inputs/" + fn + ".json";
+
   string fn_path = "../../test_mayo/" + fn + "/";
   string correct_path = fn_path + fn + ".smt2";
   string faulty_dir = fn_path + "loopOrFuncSkip/";
+  string active_path = fn_path + "active_lengths.json";
 
   vector<string> faultyCandidates;
   for (const auto &entry : fs::directory_iterator(faulty_dir))
@@ -514,147 +970,276 @@ int main(int argc, char **argv) {
     cerr << "No .smt2 file found in " << faulty_dir << "\n";
     return 1;
   }
-  string faulty_path = faultyCandidates.front();
+  std::sort(faultyCandidates.begin(), faultyCandidates.end());
 
-  FunctionSpec spec = get_function_spec(fn);
+  cout << "[+] correct trace:  " << correct_path << "\n";
+  cout << "[+] spec:           " << spec_path << "\n";
+  cout << "[+] active lengths: " << active_path << "\n";
+  cout << "[+] faulty traces found in " << faulty_dir << " ("
+       << faultyCandidates.size() << "):\n";
+  for (auto &p : faultyCandidates)
+    cout << "    " << p << "\n";
+  if (!variedOverride.empty())
+    cout << "[+] varying:        " << variedOverride << "\n";
 
-  // ---- Single-threaded setup: pure string/file work, no z3 objects ----
-  string correct_src =
-      strip_bad_asserts(strip_last_assert(read_file(correct_path)));
-  string faulty_src =
-      strip_bad_asserts(strip_last_assert(read_file(faulty_path)));
+  string correct_raw = read_file(correct_path);
+  MemoryLayout layoutC = parse_layout(correct_raw);
+  print_layout(layoutC, "correct");
 
-  static const string FINAL_VERSION_CORRECT =
-      "c_93"; // TODO: derive, not hardcode
-  static const string FINAL_VERSION_FAULTY = "c_93";
-  static const string GLOBAL_BASE_CORRECT = "Global_M_correct";
-  static const string GLOBAL_BASE_FAULTY = "Global_M_faulty";
+  string outputRegionExclude;
+  {
+    JsonObj peek = parse_flat_json(read_file(spec_path));
+    const JsonValue *v = json_find(peek, "output");
+    if (v && v->isString && layoutC.regions.count(v->s)) {
+      outputRegionExclude = v->s;
+      cout << "[note] excluding output region '" << outputRegionExclude
+           << "' from positional input matching\n";
+    }
+  }
 
-  string INITIAL_VERSION_CORRECT = find_initial_version(
-      correct_src, GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT);
-  string INITIAL_VERSION_FAULTY = find_initial_version(
-      faulty_src, GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY);
+  ArgMap argMap = build_arg_map(fn, active_path, layoutC, correct_raw,
+                                outputRegionExclude);
+  FunctionSpec spec = load_function_spec(fn, spec_path, layoutC, correct_raw,
+                                         argMap, variedOverride);
 
-  // Written once, up front -- every thread reads the same four files.
+  for (auto &a : spec.args)
+    cout << "[arg] " << a.param << " (" << a.name << ") "
+         << (a.role == ArgRole::FixedInput ? "fixed=" + to_string(a.fillValue)
+                                           : string("varied"))
+         << " [" << a.start << ".." << a.start + a.length - 1 << "]\n";
+  if (spec.out.scalar)
+    cout << "[out] scalar via anchor " << spec.out.anchorName << "\n";
+  else
+    cout << "[out] " << spec.out.label << " [" << spec.out.start << ".."
+         << spec.out.start + spec.out.length - 1 << "], compare byte "
+         << spec.out.start + spec.out.compareIndex << "\n";
+
+  string correct_src = strip_bad_asserts(strip_last_assert(correct_raw));
+
+  string anchC;
+  vector<string> inputMemC;
+  if (spec.out.scalar) {
+    anchC = resolve_final_ssa_symbol(correct_src, spec.out.anchorName, false);
+    inputMemC = find_anchor_read_memories(correct_src, anchC);
+    cout << "[mem] scalar anchor (correct): " << anchC << "\n";
+    cout << "[mem] scalar reads correct:";
+    for (const string &m : inputMemC)
+      cout << " " << m;
+    cout << "\n";
+  } else {
+    inputMemC.push_back(layoutC.finalMem);
+    cout << "[mem] array output/input constraints on Final_Memory (correct): "
+         << layoutC.finalMem << "\n";
+  }
+
+  vector<string> anonC = find_anonymous_int_temps(correct_src);
+  if (!anonC.empty())
+    cout << "[assume] " << anonC.size()
+         << " anonymous temporary(ies) in the correct trace with no "
+            "defining equation (e.g. "
+         << anonC.front()
+         << ") are constrained to {0,1} -- the \"multiply by one bit\" "
+            "idiom seen at their use sites. This is an ASSUMPTION about "
+            "trace semantics, not something derived from the file; verify "
+            "against ground truth if results look wrong.\n";
+
   string c1 = write_suffixed(correct_src, "C1", fn_path);
-  string f1 = write_suffixed(faulty_src, "F1", fn_path);
   string c2 = write_suffixed(correct_src, "C2", fn_path);
-  string f2 = write_suffixed(faulty_src, "F2", fn_path);
 
-  // ---- Spawn one thread per value 0..15, each with its own z3::context.
-  //      Each thread writes to its own index of `results`, so no mutex
-  //      is needed for that -- only the final aggregation/printing runs
-  //      single-threaded again after every thread has joined. ----
-  vector<ValueResult> results(16);
-  vector<std::thread> threads;
-  threads.reserve(16);
-  for (int v = 0; v < 16; v++) {
-    threads.emplace_back([&, v]() {
-      results[v] = check_value(v, spec, c1, f1, c2, f2, correct_src, faulty_src,
-                               GLOBAL_BASE_CORRECT, GLOBAL_BASE_FAULTY,
-                               FINAL_VERSION_CORRECT, FINAL_VERSION_FAULTY,
-                               INITIAL_VERSION_CORRECT, INITIAL_VERSION_FAULTY);
-    });
-  }
-  for (auto &t : threads)
-    t.join();
+  // ---- one full solve per faulty candidate in loopOrFuncSkip/, each of
+  //      which spawns one thread per sweep value 0..fieldSize-1 ----
+  for (const string &faulty_path : faultyCandidates) {
+    string tag = fs::path(faulty_path).stem().string();
+    cout << "\n########################################\n";
+    cout << "# faulty trace: " << faulty_path << "\n";
+    cout << "########################################\n";
 
-  // ---- Aggregate + print summary ----
-  vector<int> satValues, unsatValues, unknownValues;
-  for (auto &r : results) {
-    if (r.res == sat)
-      satValues.push_back(r.value);
-    else if (r.res == unsat)
-      unsatValues.push_back(r.value);
-    else
-      unknownValues.push_back(r.value);
-  }
+    string faulty_raw = read_file(faulty_path);
+    MemoryLayout layoutF = parse_layout(faulty_raw);
+    check_layouts_match(layoutC, layoutF);
+    print_layout(layoutF, "faulty");
 
-  cout << "SAT for values:";
-  for (int v : satValues)
-    cout << " " << v;
-  cout << "\n";
-  cout << "UNSAT for values:";
-  for (int v : unsatValues)
-    cout << " " << v;
-  cout << "\n";
-  if (!unknownValues.empty()) {
-    cout << "UNKNOWN/TIMEOUT for values:";
-    for (int v : unknownValues)
+    string faulty_src = strip_bad_asserts(strip_last_assert(faulty_raw));
+
+    if (traces_structurally_identical(correct_src, faulty_src)) {
+      cout << "[!] WARNING: once _correct/_faulty labels are normalized "
+              "away, this faulty trace is IDENTICAL to the correct trace "
+              "(same formula, same internal SSA numbering). The fault "
+              "does not appear to be encoded in this SMT file at all -- "
+              "any SAT/UNSAT result below is a property of that identity, "
+              "not of the actual fault. Check the trace-generation "
+              "pipeline for this fault site, not this query.\n";
+    }
+
+    string anchF;
+    vector<string> inputMemF;
+    if (spec.out.scalar) {
+      anchF = resolve_final_ssa_symbol(faulty_src, spec.out.anchorName, true);
+      inputMemF = find_anchor_read_memories(faulty_src, anchF);
+      cout << "[mem] scalar anchor (faulty): " << anchF << "\n";
+      cout << "[mem] scalar reads faulty:";
+      for (const string &m : inputMemF)
+        cout << " " << m;
+      cout << "\n";
+    } else {
+      inputMemF.push_back(layoutF.finalMem);
+    }
+
+    vector<string> anonF = find_anonymous_int_temps(faulty_src);
+    if (!anonF.empty())
+      cout << "[assume] " << anonF.size()
+           << " anonymous temporary(ies) in the faulty trace similarly "
+              "constrained to {0,1}\n";
+
+    string f1 = write_suffixed(faulty_src, "F1", fn_path);
+    string f2 = write_suffixed(faulty_src, "F2", fn_path);
+
+    if (spec.args.empty() ||
+        find_if(spec.args.begin(), spec.args.end(), [](const ResolvedArg &a) {
+          return a.role == ArgRole::VariedInput;
+        }) == spec.args.end()) {
+      // No input to sweep -- fall back to a single-threaded concrete check.
+      cout << "[note] no input to vary -- running a single fully-concrete "
+              "check instead of a threaded sweep.\n";
+      ValueResult r = check_value(0, spec, c1, f1, c2, f2, inputMemC, inputMemF,
+                                  anchC, anchF, layoutC.finalMem,
+                                  layoutF.finalMem, anonC, anonF);
+      cout << (r.res == sat ? "SAT!\n"
+               : r.res == unsat ? "UNSAT\n"
+                                 : "UNKNOWN\n");
+      continue;
+    }
+
+    cout << "Spawning " << spec.fieldSize
+         << " threads, one per sweep value 0.." << spec.fieldSize - 1
+         << "\n";
+
+    vector<ValueResult> results(spec.fieldSize);
+    vector<std::thread> threads;
+    threads.reserve(spec.fieldSize);
+    for (int v = 0; v < spec.fieldSize; v++) {
+      threads.emplace_back([&, v]() {
+        results[v] = check_value(v, spec, c1, f1, c2, f2, inputMemC, inputMemF,
+                                 anchC, anchF, layoutC.finalMem,
+                                 layoutF.finalMem, anonC, anonF);
+      });
+    }
+    for (auto &t : threads)
+      t.join();
+
+    // ---- Aggregate + print (single-threaded again) ----
+    vector<int> satValues, unsatValues, unknownValues;
+    for (auto &r : results) {
+      if (r.res == sat)
+        satValues.push_back(r.value);
+      else if (r.res == unsat)
+        unsatValues.push_back(r.value);
+      else
+        unknownValues.push_back(r.value);
+    }
+
+    for (auto &r : results) {
+      if (r.res != sat)
+        continue;
+      cout << "\n================ value " << r.value << " (SAT) ================\n";
+      cout << "  correct[1] = " << r.c1v << "  faulty[1] = " << r.f1v << "\n";
+      cout << "  correct[2] = " << r.c2v << "  faulty[2] = " << r.f2v << "\n";
+      if (spec.out.hasExpected) {
+        long long got = r.out1_correct[spec.out.compareIndex];
+        if (got != spec.out.expected)
+          cout << "  [!] expected " << spec.out.label << "["
+               << spec.out.compareIndex << "] = " << spec.out.expected
+               << " per function_inputs, got " << got
+               << " from the correct trace\n";
+      }
+    }
+
+    cout << "\n================ SWEEP SUMMARY (" << tag << ") ================\n";
+    cout << "SAT for values:";
+    for (int v : satValues)
       cout << " " << v;
     cout << "\n";
+    cout << "UNSAT for values:";
+    for (int v : unsatValues)
+      cout << " " << v;
+    cout << "\n";
+    if (!unknownValues.empty()) {
+      cout << "UNKNOWN/TIMEOUT for values:";
+      for (int v : unknownValues)
+        cout << " " << v;
+      cout << "\n[!] some values could not be decided within the timeout -- "
+              "treat the SAT/UNSAT values above as partial, not "
+              "exhaustive.\n";
+    }
+    if (!satValues.empty() && (long long)satValues.size() == spec.fieldSize)
+      cout << "[!] every value was SAT -- the compared outputs are probably "
+              "not determined by the seeded inputs; check the seed point, "
+              "or whether this faulty trace actually differs from the "
+              "correct one.\n";
+
+    if (satValues.empty())
+      continue;
+
+    string witness_path = fn_path + "witness_" + tag + ".json";
+    ofstream wj(witness_path);
+    wj << "{\n";
+    wj << "  \"function\": \"" << fn << "\",\n";
+    wj << "  \"fault\": \"" << tag << "\",\n";
+    wj << "  \"sat_values\": "
+       << json_arr(vector<long long>(satValues.begin(), satValues.end()))
+       << ",\n";
+    wj << "  \"trials\": [\n";
+    bool firstTrial = true;
+    for (auto &r : results) {
+      if (r.res != sat)
+        continue;
+
+      auto writeInputsObj =
+          [&](std::function<vector<long long>(VariedEntry &)> pick) {
+            wj << "        \"inputs\": {\n";
+            bool ifirst = true;
+            for (auto &fe : r.fixedVals) {
+              wj << (ifirst ? "          " : ",\n          ") << "\""
+                 << fe.name << "\": " << json_arr(fe.vals);
+              ifirst = false;
+            }
+            for (auto &ve : r.variedVals) {
+              wj << (ifirst ? "          " : ",\n          ") << "\""
+                 << ve.name << "\": " << json_arr(pick(ve));
+              ifirst = false;
+            }
+            wj << "\n        }";
+          };
+
+      wj << (firstTrial ? "    {\n" : ",\n    {\n");
+      wj << "      \"sweep_value\": " << r.value << ",\n";
+      wj << "      \"exec1_ineffective\": {\n";
+      writeInputsObj([](VariedEntry &ve) { return ve.v1; });
+      wj << ",\n";
+      wj << "        \"expected\": {\n";
+      wj << "          \"" << spec.out.label
+         << "_correct\": " << json_arr(r.out1_correct) << ",\n";
+      wj << "          \"" << spec.out.label
+         << "_faulty\": " << json_arr(r.out1_faulty) << "\n";
+      wj << "        }\n";
+      wj << "      },\n";
+      wj << "      \"exec2\": {\n";
+      writeInputsObj([](VariedEntry &ve) { return ve.v2; });
+      wj << ",\n";
+      wj << "        \"expected\": {\n";
+      wj << "          \"" << spec.out.label
+         << "_correct\": " << json_arr(r.out2_correct) << ",\n";
+      wj << "          \"" << spec.out.label
+         << "_faulty\": " << json_arr(r.out2_faulty) << "\n";
+      wj << "        }\n";
+      wj << "      }\n";
+      wj << "    }";
+      firstTrial = false;
+    }
+    wj << "\n  ]\n";
+    wj << "}\n";
+    cout << "[+] witness exported to " << witness_path << "\n";
   }
-
-  if (satValues.empty()) {
-    cout << "[!] No SAT value found; no witness exported.\n";
-    return 0;
-  }
-
-  // // ---- Combined witness.json covering every SAT value ----
-  // string outLabel = !spec.outputLabel.empty() ? spec.outputLabel
-  //                   : spec.isScalarOutput     ? "ret"
-  //                                             : spec.outputIndexVar;
-
-  // string witness_path = fn_path + "witness.json";
-  // ofstream wj(witness_path);
-  // wj << "{\n";
-  // wj << "  \"function\": \"" << fn << "\",\n";
-  // wj << "  \"sat_values\": "
-  //    << json_arr(vector<long long>(satValues.begin(), satValues.end()))
-  //    << ",\n";
-  // wj << "  \"trials\": [\n";
-
-  // bool firstTrial = true;
-  // for (auto &r : results) {
-  //   if (r.res != sat)
-  //     continue;
-
-  //   auto writeInputsObj =
-  //       [&](std::function<vector<long long>(VariedEntry &)> pick) {
-  //         wj << "        \"inputs\": {\n";
-  //         bool ifirst = true;
-  //         for (auto &fe : r.fixedVals) {
-  //           wj << (ifirst ? "          " : ",\n          ") << "\"" << fe.name
-  //              << "\": " << json_arr(fe.vals);
-  //           ifirst = false;
-  //         }
-  //         for (auto &ve : r.variedVals) {
-  //           wj << (ifirst ? "          " : ",\n          ") << "\"" << ve.name
-  //              << "\": " << json_arr(pick(ve));
-  //           ifirst = false;
-  //         }
-  //         wj << "\n        }";
-  //       };
-
-  //   wj << (firstTrial ? "    {\n" : ",\n    {\n");
-  //   wj << "      \"sweep_value\": " << r.value << ",\n";
-  //   wj << "      \"exec1_ineffective\": {\n";
-  //   writeInputsObj([](VariedEntry &ve) { return ve.v1; });
-  //   wj << ",\n";
-  //   wj << "        \"expected\": {\n";
-  //   wj << "          \"" << outLabel
-  //      << "_correct\": " << json_arr(r.out1_correct) << ",\n";
-  //   wj << "          \"" << outLabel << "_faulty\": " << json_arr(r.out1_faulty)
-  //      << "\n";
-  //   wj << "        }\n";
-  //   wj << "      },\n";
-  //   wj << "      \"exec2\": {\n";
-  //   writeInputsObj([](VariedEntry &ve) { return ve.v2; });
-  //   wj << ",\n";
-  //   wj << "        \"expected\": {\n";
-  //   wj << "          \"" << outLabel
-  //      << "_correct\": " << json_arr(r.out2_correct) << ",\n";
-  //   wj << "          \"" << outLabel << "_faulty\": " << json_arr(r.out2_faulty)
-  //      << "\n";
-  //   wj << "        }\n";
-  //   wj << "      }\n";
-  //   wj << "    }";
-  //   firstTrial = false;
-  // }
-
-  // wj << "\n  ]\n";
-  // wj << "}\n";
-  // cout << "[+] witness exported to " << witness_path << "\n";
 
   return 0;
 }

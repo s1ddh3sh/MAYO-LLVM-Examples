@@ -107,6 +107,29 @@ static unsigned bits_for_field(long long fieldSize) {
   return bits;
 }
 
+// llvmbmc's SMT-LIB printer emits some intermediates as anonymous integer
+// temporaries -- `(declare-fun i_7_ () Int)` with nothing after the final
+// underscore -- and never writes a defining equation for them anywhere in
+// the file. In lincomb these appear exactly as `(* i_42_ (select mem addr))`
+// inside a conditional-XOR chain: the standard "multiply by one bit of the
+// GF(16) multiplier, else 0" idiom from schoolbook double-and-add
+// multiplication. Left as fully free integers, Z3 either finds a degenerate
+// zero-out solution that trivially satisfies an equality without reflecting
+// the real computation, or times out doing nonlinear reasoning over
+// int2bv(8, <unbounded int>). Bounding them to {0,1} is an ASSUMPTION about
+// their meaning, stated explicitly and printed at runtime -- if wrong for a
+// given function, its results should be treated as unverified until the
+// upstream trace emits real defining equations for these temporaries.
+static vector<string> find_anonymous_int_temps(const string &src) {
+  static const regex re(R"(\(declare-fun\s+(i_\d+_)\s+\(\)\s+Int\))");
+  vector<string> out;
+  for (auto it = sregex_iterator(src.begin(), src.end(), re),
+            e = sregex_iterator();
+       it != e; ++it)
+    out.push_back((*it)[1].str());
+  return out;
+}
+
 // =====================================================================
 // Memory layout, parsed from the trace's own comments.
 // =====================================================================
@@ -268,11 +291,7 @@ static bool trace_pinned_scalar(const string &src, const string &base,
 
 // =====================================================================
 // Detect a faulty trace that is IDENTICAL to the correct trace once its SSA
-// labelling is normalized away. A genuinely recompiled faulty variant gets
-// fresh internal SSA numbering from the compiler, so if normalization makes
-// the two files byte-for-byte equal, the fault was almost certainly never
-// encoded into this trace by the upstream pipeline -- any SAT/UNSAT computed
-// from it is not evidence about the fault itself.
+// labelling is normalized away.
 // =====================================================================
 
 static string normalize_trace_labels(const string &src, bool faulty) {
@@ -694,7 +713,9 @@ check_value_correction(int alphaCandidate, const FunctionSpec &spec,
                        const string &correct_src, const string &faulty_src,
                        const MemoryLayout &layoutC, const MemoryLayout &layoutF,
                        const vector<string> &inputMemC,
-                       const vector<string> &inputMemF) {
+                       const vector<string> &inputMemF,
+                       const vector<string> &anonC,
+                       const vector<string> &anonF) {
   const ResolvedOutput &out = spec.out;
   CorrectionResult res;
   res.value = alphaCandidate;
@@ -709,7 +730,10 @@ check_value_correction(int alphaCandidate, const FunctionSpec &spec,
   solver slv = pipeline.mk_solver();
 
   params p(ctx);
-  p.set("timeout", 5000u);
+  // Raised from 5s: bounding the anonymous temporaries below still leaves a
+  // fairly deep bit-blasted div/mod/int2bv reduction chain for functions
+  // like lincomb's GF(16) multiply.
+  p.set("timeout", 20000u);
   slv.set(p);
 
   expr_vector C = ctx.parse_file(c.c_str());
@@ -718,6 +742,15 @@ check_value_correction(int alphaCandidate, const FunctionSpec &spec,
     slv.add(e);
   for (expr e : F)
     slv.add(e);
+
+  for (auto &base : anonC) {
+    expr v = ctx.int_const((base + "_C").c_str());
+    slv.add(v >= ctx.int_val(0) && v <= ctx.int_val(1));
+  }
+  for (auto &base : anonF) {
+    expr v = ctx.int_const((base + "_F").c_str());
+    slv.add(v >= ctx.int_val(0) && v <= ctx.int_val(1));
+  }
 
   z3::sort arr_sort = ctx.array_sort(ctx.int_sort(), ctx.int_sort());
   auto mem = [&](const string &sym, const string &tag) {
@@ -891,14 +924,22 @@ int main(int argc, char **argv) {
          << layoutC.finalMem << "\n";
   }
 
+  vector<string> anonC = find_anonymous_int_temps(correct_src);
+  if (!anonC.empty())
+    cout << "[assume] " << anonC.size()
+         << " anonymous temporary(ies) in the correct trace with no "
+            "defining equation (e.g. "
+         << anonC.front()
+         << ") are constrained to {0,1} -- the \"multiply by one bit\" "
+            "idiom seen at their use sites. This is an ASSUMPTION about "
+            "trace semantics, not something derived from the file; verify "
+            "against ground truth if results look wrong.\n";
+
   string c = write_suffixed(correct_src, "C", fn_path);
 
   bool anySat = false;
 
   // ---- one full brute-force pass per faulty candidate in loopOrFuncSkip/ ----
-  // Earlier versions of this tool picked only faultyCandidates.front(),
-  // silently ignoring every other fault variant present in the directory.
-  // Loop over all of them instead so every fault gets evaluated in one run.
   for (const string &faulty_path : faultyCandidates) {
     string tag = fs::path(faulty_path).stem().string();
     cout << "\n########################################\n";
@@ -935,6 +976,12 @@ int main(int argc, char **argv) {
       inputMemF.push_back(layoutF.finalMem);
     }
 
+    vector<string> anonF = find_anonymous_int_temps(faulty_src);
+    if (!anonF.empty())
+      cout << "[assume] " << anonF.size()
+           << " anonymous temporary(ies) in the faulty trace similarly "
+              "constrained to {0,1}\n";
+
     string f = write_suffixed(faulty_src, "F", fn_path);
 
     vector<int> satValues, unsatValues, unknownValues;
@@ -950,7 +997,7 @@ int main(int argc, char **argv) {
            << " ================\n";
       CorrectionResult r = check_value_correction(
           alphaCandidate, spec, c, f, correct_src, faulty_src, layoutC,
-          layoutF, inputMemC, inputMemF);
+          layoutF, inputMemC, inputMemF, anonC, anonF);
 
       int v = alphaCandidate;
       if (r.res == sat) {
@@ -1030,12 +1077,12 @@ int main(int argc, char **argv) {
       cout << "UNKNOWN/TIMEOUT for candidates:";
       for (int v : unknownValues)
         cout << " " << v;
-      cout << "\n";
+      cout << "\n[!] some candidates could not be decided within the "
+              "timeout -- treat the SAT/UNSAT lists above as partial.\n";
     }
-    if ((long long)satValues.size() == spec.fieldSize)
+    if (!satValues.empty() && (long long)satValues.size() == spec.fieldSize)
       cout << "[!] every alpha was SAT -- the compared values are probably "
-              "not determined by the pinned inputs; check the seed point "
-              "and look for unconstrained i_<N>_ temporaries in the trace, "
+              "not determined by the pinned inputs; check the seed point, "
               "or whether this faulty trace actually differs from the "
               "correct one.\n";
 
