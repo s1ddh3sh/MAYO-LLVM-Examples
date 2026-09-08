@@ -224,11 +224,13 @@ static vector<string> find_anchor_read_memories(const string &src,
 
 static void check_layouts_match(const MemoryLayout &a, const MemoryLayout &b) {
   if (a.regions.size() != b.regions.size())
-    throw runtime_error("correct/faulty traces declare different region counts");
+    throw runtime_error(
+        "correct/faulty traces declare different region counts");
   for (auto &kv : a.regions) {
     auto it = b.regions.find(kv.first);
     if (it == b.regions.end())
-      throw runtime_error("Region '" + kv.first + "' missing from faulty trace");
+      throw runtime_error("Region '" + kv.first +
+                          "' missing from faulty trace");
     if (it->second.start != kv.second.start || it->second.end != kv.second.end)
       throw runtime_error("Region '" + kv.first +
                           "' has different bounds in correct vs faulty trace");
@@ -451,10 +453,9 @@ static ArgMap build_arg_map(const string &fn, const string &activePath,
       throw runtime_error("active_lengths: '" + kv.first +
                           "' must be an integer");
     long long dummy;
-    bool isScalar =
-        L.regions.count("__mbc_arg_" + fn + "_" + kv.first) ||
-        trace_pinned_scalar(src, "__mbc_arg_" + fn + "_" + kv.first, false,
-                            dummy);
+    bool isScalar = L.regions.count("__mbc_arg_" + fn + "_" + kv.first) ||
+                    trace_pinned_scalar(src, "__mbc_arg_" + fn + "_" + kv.first,
+                                        false, dummy);
     if (isScalar) {
       M.paramToRegion[kv.first] = "__mbc_arg_" + fn + "_" + kv.first;
       continue;
@@ -522,7 +523,17 @@ struct FunctionSpec {
   ResolvedOutput out;
   long long fieldSize = 16;
 };
-
+static string find_region_by_prefix(const string &key, const MemoryLayout &L) {
+  string found;
+  for (auto &n : L.order) {
+    if (n.rfind(key, 0) == 0) { // n starts with key
+      if (!found.empty())
+        return ""; // ambiguous -- refuse to guess
+      found = n;
+    }
+  }
+  return found;
+}
 static string resolve_region_name(const string &key, const ArgMap &M,
                                   const MemoryLayout &L) {
   auto it = M.paramToRegion.find(key);
@@ -530,6 +541,9 @@ static string resolve_region_name(const string &key, const ArgMap &M,
     return it->second;
   if (L.regions.count(key))
     return key;
+  string pfx = find_region_by_prefix(key, L);
+  if (!pfx.empty())
+    return pfx;
   return "";
 }
 
@@ -842,17 +856,28 @@ int main(int argc, char **argv) {
   string fn = argv[1];
   string fn_path = "../../test_mayo/" + fn + "/";
   string correct_path = fn_path + fn + ".smt2";
-  string faulty_dir = fn_path + "loopOrFuncSkip/";
+  // Fault traces are split across three categories emitted by the
+  // injection pipeline; collect .smt2 files from every one that exists
+  // rather than hardcoding a single directory.
+  static const vector<string> faultDirNames = {"loopOrFuncSkip", "binOpFault",
+                                               "loadStoreSkip"};
   string active_path = fn_path + "active_lengths.json";
   string spec_path =
       argc > 2 ? argv[2] : ("../../function_inputs/" + fn + ".json");
-
   vector<string> faultyCandidates;
-  for (const auto &entry : fs::directory_iterator(faulty_dir))
-    if (entry.is_regular_file() && entry.path().extension() == ".smt2")
-      faultyCandidates.push_back(entry.path().string());
+  for (const string &dirName : faultDirNames) {
+    string dir = fn_path + dirName + "/";
+    if (!fs::exists(dir) || !fs::is_directory(dir))
+      continue;
+    for (const auto &entry : fs::directory_iterator(dir))
+      if (entry.is_regular_file() && entry.path().extension() == ".smt2")
+        faultyCandidates.push_back(entry.path().string());
+  }
   if (faultyCandidates.empty()) {
-    cerr << "No .smt2 file found in " << faulty_dir << "\n";
+    cerr << "No .smt2 files found in any of:";
+    for (auto &d : faultDirNames)
+      cerr << " " << fn_path + d + "/";
+    cerr << "\n";
     return 1;
   }
   std::sort(faultyCandidates.begin(), faultyCandidates.end());
@@ -860,8 +885,7 @@ int main(int argc, char **argv) {
   cout << "[+] correct trace:  " << correct_path << "\n";
   cout << "[+] spec:           " << spec_path << "\n";
   cout << "[+] active lengths: " << active_path << "\n";
-  cout << "[+] faulty traces found in " << faulty_dir << " ("
-       << faultyCandidates.size() << "):\n";
+  cout << "[+] faulty traces found (" << faultyCandidates.size() << "):\n";
   for (auto &p : faultyCandidates)
     cout << "    " << p << "\n";
 
@@ -873,15 +897,20 @@ int main(int argc, char **argv) {
   {
     JsonObj peek = parse_flat_json(read_file(spec_path));
     const JsonValue *v = json_find(peek, "output");
-    if (v && v->isString && layoutC.regions.count(v->s)) {
-      outputRegionExclude = v->s;
-      cout << "[note] excluding output region '" << outputRegionExclude
-           << "' from positional input matching\n";
+    if (v && v->isString) {
+      if (layoutC.regions.count(v->s))
+        outputRegionExclude = v->s;
+      else
+        outputRegionExclude = find_region_by_prefix(v->s, layoutC);
+      if (!outputRegionExclude.empty())
+        cout << "[note] excluding output region '" << outputRegionExclude
+             << "' from positional input matching (JSON said '" << v->s
+             << "')\n";
     }
   }
 
-  ArgMap argMap = build_arg_map(fn, active_path, layoutC, correct_raw,
-                                outputRegionExclude);
+  ArgMap argMap =
+      build_arg_map(fn, active_path, layoutC, correct_raw, outputRegionExclude);
   FunctionSpec spec =
       load_function_spec(fn, spec_path, layoutC, correct_raw, argMap);
   const ResolvedOutput &out = spec.out;
@@ -976,9 +1005,8 @@ int main(int argc, char **argv) {
 
     int numCandidates = (int)spec.fieldSize;
     cout << "Brute-forcing alpha in F_" << spec.fieldSize << " across "
-         << numCandidates
-         << " threads, against the single fixed scenario in " << spec_path
-         << "\n";
+         << numCandidates << " threads, against the single fixed scenario in "
+         << spec_path << "\n";
 
     vector<CorrectionResult> results(numCandidates);
     vector<std::thread> threads;
@@ -1074,38 +1102,38 @@ int main(int argc, char **argv) {
     wj << "  \"field_size\": " << spec.fieldSize << ",\n";
     wj << "  \"sat_alpha_candidates\": "
        << json_arr(vector<long long>(satValues.begin(), satValues.end()))
-       << ",\n";
-    wj << "  \"trials\": [\n";
-    bool firstTrial = true;
-    for (auto &r : results) {
-      if (r.res != sat)
-        continue;
+       << "\n";
+    // wj << "  \"trials\": [\n";
+    // bool firstTrial = true;
+    // for (auto &r : results) {
+    //   if (r.res != sat)
+    //     continue;
 
-      wj << (firstTrial ? "    {\n" : ",\n    {\n");
-      wj << "      \"alpha_candidate\": " << r.value << ",\n";
-      wj << "      \"correction\": {\n";
-      if (r.corrIndex >= 0)
-        wj << "        \"index\": " << r.corrIndex << ",\n";
-      wj << "        \"alpha\": " << r.alpha << "\n";
-      wj << "      },\n";
-      wj << "      \"inputs\": {\n";
-      bool ifirst = true;
-      for (auto &iv : r.inputs) {
-        wj << (ifirst ? "        " : ",\n        ") << "\"" << iv.name
-           << "\": " << json_arr(iv.vals);
-        ifirst = false;
-      }
-      wj << "\n      },\n";
-      wj << "      \"outputs\": {\n";
-      wj << "        \"" << out.label
-         << "_correct\": " << json_arr(r.out_correct) << ",\n";
-      wj << "        \"" << out.label
-         << "_faulty\": " << json_arr(r.out_faulty) << "\n";
-      wj << "      }\n";
-      wj << "    }";
-      firstTrial = false;
-    }
-    wj << "\n  ]\n";
+    //   wj << (firstTrial ? "    {\n" : ",\n    {\n");
+    //   wj << "      \"alpha_candidate\": " << r.value << ",\n";
+    //   wj << "      \"correction\": {\n";
+    //   if (r.corrIndex >= 0)
+    //     wj << "        \"index\": " << r.corrIndex << ",\n";
+    //   wj << "        \"alpha\": " << r.alpha << "\n";
+    //   wj << "      },\n";
+    //   wj << "      \"inputs\": {\n";
+    //   bool ifirst = true;
+    //   for (auto &iv : r.inputs) {
+    //     wj << (ifirst ? "        " : ",\n        ") << "\"" << iv.name
+    //        << "\": " << json_arr(iv.vals);
+    //     ifirst = false;
+    //   }
+    //   wj << "\n      },\n";
+    //   wj << "      \"outputs\": {\n";
+    //   wj << "        \"" << out.label
+    //      << "_correct\": " << json_arr(r.out_correct) << ",\n";
+    //   wj << "        \"" << out.label
+    //      << "_faulty\": " << json_arr(r.out_faulty) << "\n";
+    //   wj << "      }\n";
+    //   wj << "    }";
+    //   firstTrial = false;
+    // }
+    // wj << "\n  ]\n";
     wj << "}\n";
     cout << "[+] correction witness exported to " << witness_path << "\n";
   }

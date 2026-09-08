@@ -179,8 +179,8 @@ static vector<string> find_anchor_read_memories(const string &src,
                                                 const string &anchorSym) {
   size_t defPos = src.rfind("(= " + anchorSym);
   if (defPos == string::npos)
-    throw runtime_error("Could not find the defining assert for '" +
-                        anchorSym + "'");
+    throw runtime_error("Could not find the defining assert for '" + anchorSym +
+                        "'");
 
   size_t assertStart = src.rfind("(assert", defPos);
   if (assertStart == string::npos)
@@ -257,7 +257,13 @@ static string resolve_final_ssa_symbol(const string &src, const string &base,
                         "' (looked for i_<N>_" + base + suffix + ")");
   return best;
 }
-
+static string strip_scalar_pin(const string &src, const string &base,
+                               bool faulty) {
+  string suffix = faulty ? "_faulty" : "_correct";
+  regex re("\\(assert\\s*\\(=\\s*i_\\d+_" + base + suffix +
+           "\\s+-?\\d+\\)\\)\\s*");
+  return regex_replace(src, re, "");
+}
 static bool trace_pinned_scalar(const string &src, const string &base,
                                 bool faulty, long long &out) {
   string suffix = faulty ? "_faulty" : "_correct";
@@ -268,6 +274,47 @@ static bool trace_pinned_scalar(const string &src, const string &base,
     return false;
   out = stoll(m[1].str());
   return true;
+}
+
+// llvmbmc emits GF(16) reduction steps as `(div X (to_int (^ 2 4)))` --
+// integer power of two LITERAL constants, always 16. Z3 routes `^` between
+// two Ints through nonlinear integer arithmetic reasoning even when both
+// operands are constants, which is drastically more expensive than the
+// plain linear `div` this actually is. Fold it to the literal it always
+// evaluates to before Z3 ever sees it -- this changes nothing about the
+// formula's meaning, only how cheaply Z3 can decide it. Without this,
+// lincomb's 7-8 stacked reduction branches combined with the anonymous
+// temporaries above were observed to time out on EVERY sweep value/alpha
+// candidate (UNKNOWN, not UNSAT) -- i.e. inconclusive, not a negative
+// result about the fault.
+static string fold_constant_arith(const string &srcIn) {
+  string src = srcIn;
+  {
+    static const regex powRe(R"(\(\^\s+(\d+)\s+(\d+)\))");
+    string result;
+    size_t lastEnd = 0;
+    for (auto it = sregex_iterator(src.begin(), src.end(), powRe),
+              e = sregex_iterator();
+         it != e; ++it) {
+      result += src.substr(lastEnd, it->position() - lastEnd);
+      long long base = stoll((*it)[1].str());
+      long long exp = stoll((*it)[2].str());
+      long long val = 1;
+      for (long long k = 0; k < exp; k++)
+        val *= base;
+      result += to_string(val);
+      lastEnd = it->position() + it->length();
+    }
+    result += src.substr(lastEnd);
+    src = result;
+  }
+  {
+    // (to_int N) with N now a plain literal (from the fold above, or
+    // already literal in the source) is just N.
+    static const regex toIntRe(R"(\(to_int\s+(-?\d+)\))");
+    src = regex_replace(src, toIntRe, "$1");
+  }
+  return src;
 }
 
 // =====================================================================
@@ -514,8 +561,21 @@ struct FunctionSpec {
   ResolvedOutput out;
   long long fieldSize = 16;
   bool hasVaried = false;
+  bool variedIsScalar = false;
+  string variedScalarBase; // e.g. "__mbc_arg_add_f_b"
+  long long variedScalarFill = 0;
 };
-
+static string find_region_by_prefix(const string &key, const MemoryLayout &L) {
+  string found;
+  for (auto &n : L.order) {
+    if (n.rfind(key, 0) == 0) { // n starts with key
+      if (!found.empty())
+        return ""; // ambiguous -- refuse to guess
+      found = n;
+    }
+  }
+  return found;
+}
 static string resolve_region_name(const string &key, const ArgMap &M,
                                   const MemoryLayout &L) {
   auto it = M.paramToRegion.find(key);
@@ -523,6 +583,9 @@ static string resolve_region_name(const string &key, const ArgMap &M,
     return it->second;
   if (L.regions.count(key))
     return key;
+  string pfx = find_region_by_prefix(key, L);
+  if (!pfx.empty())
+    return pfx;
   return "";
 }
 
@@ -638,16 +701,26 @@ static FunctionSpec load_function_spec(const string &fn, const string &jsonPath,
                                  false, fromTrace))
       scalarBase = "__mbc_arg_" + fn + "_" + key;
     if (!scalarBase.empty()) {
+      if (spec.hasVaried && key == variedName) {
+        spec.variedIsScalar = true;
+        spec.variedScalarBase = scalarBase;
+        spec.variedScalarFill = kv.second.isString ? 0 : kv.second.i;
+        sawVaried = true;
+        cout << "[scalar] " << key << " (" << scalarBase
+             << ") marked as VARIED -- trace value " << fromTrace
+             << " will be freed, baseline " << spec.variedScalarFill
+             << " used for the other 3 trials\n";
+        continue;
+      }
       if (!kv.second.isString && fromTrace != kv.second.i)
-        throw runtime_error("Scalar '" + key + "' is " +
-                            to_string(kv.second.i) + " in " + jsonPath +
-                            " but " + to_string(fromTrace) +
-                            " in the trace -- stale function_inputs file?");
+        throw runtime_error(
+            "Scalar '" + key + "' is " + to_string(kv.second.i) + " in " +
+            jsonPath + " but " + to_string(fromTrace) +
+            " in the trace -- stale function_inputs file?"); // unchanged
       cout << "[scalar] " << key << " = " << fromTrace << " (pinned as "
            << scalarBase << ")\n";
       continue;
     }
-
     string region = resolve_region_name(key, M, L);
     if (!region.empty()) {
       if (kv.second.isString)
@@ -728,15 +801,13 @@ struct ValueResult {
   vector<long long> out1_correct, out1_faulty, out2_correct, out2_faulty;
 };
 
-static ValueResult check_value(int value, const FunctionSpec &spec,
-                               const string &c1, const string &f1,
-                               const string &c2, const string &f2,
-                               const vector<string> &inputMemC,
-                               const vector<string> &inputMemF,
-                               const string &anchC, const string &anchF,
-                               const string &finalMemC, const string &finalMemF,
-                               const vector<string> &anonC,
-                               const vector<string> &anonF) {
+static ValueResult
+check_value(int value, const FunctionSpec &spec, const string &c1,
+            const string &f1, const string &c2, const string &f2,
+            const vector<string> &inputMemC, const vector<string> &inputMemF,
+            const string &anchC, const string &anchF, const string &finalMemC,
+            const string &finalMemF, const vector<string> &anonC,
+            const vector<string> &anonF) {
   ValueResult out;
   out.value = value;
 
@@ -871,7 +942,7 @@ static ValueResult check_value(int value, const FunctionSpec &spec,
 
   // Ineffective-fault condition: fault masked in trial 1.
   slv.add(c1v == f1v);
-  // slv.add(c2v != f2v);   // ... and observable in trial 2
+  slv.add(c2v != f2v); // ... and observable in trial 2
 
   slv.add(sweepVar == ctx.int_val(value));
 
@@ -959,15 +1030,27 @@ int main(int argc, char **argv) {
 
   string fn_path = "../../test_mayo/" + fn + "/";
   string correct_path = fn_path + fn + ".smt2";
-  string faulty_dir = fn_path + "loopOrFuncSkip/";
+  // Fault traces are split across three categories emitted by the
+  // injection pipeline; collect .smt2 files from every one that exists
+  // rather than hardcoding a single directory.
+  static const vector<string> faultDirNames = {"loopOrFuncSkip", "binOpFault",
+                                               "loadStoreSkip"};
   string active_path = fn_path + "active_lengths.json";
 
   vector<string> faultyCandidates;
-  for (const auto &entry : fs::directory_iterator(faulty_dir))
-    if (entry.is_regular_file() && entry.path().extension() == ".smt2")
-      faultyCandidates.push_back(entry.path().string());
+  for (const string &dirName : faultDirNames) {
+    string dir = fn_path + dirName + "/";
+    if (!fs::exists(dir) || !fs::is_directory(dir))
+      continue;
+    for (const auto &entry : fs::directory_iterator(dir))
+      if (entry.is_regular_file() && entry.path().extension() == ".smt2")
+        faultyCandidates.push_back(entry.path().string());
+  }
   if (faultyCandidates.empty()) {
-    cerr << "No .smt2 file found in " << faulty_dir << "\n";
+    cerr << "No .smt2 files found in any of:";
+    for (auto &d : faultDirNames)
+      cerr << " " << fn_path + d + "/";
+    cerr << "\n";
     return 1;
   }
   std::sort(faultyCandidates.begin(), faultyCandidates.end());
@@ -975,8 +1058,7 @@ int main(int argc, char **argv) {
   cout << "[+] correct trace:  " << correct_path << "\n";
   cout << "[+] spec:           " << spec_path << "\n";
   cout << "[+] active lengths: " << active_path << "\n";
-  cout << "[+] faulty traces found in " << faulty_dir << " ("
-       << faultyCandidates.size() << "):\n";
+  cout << "[+] faulty traces found (" << faultyCandidates.size() << "):\n";
   for (auto &p : faultyCandidates)
     cout << "    " << p << "\n";
   if (!variedOverride.empty())
@@ -990,15 +1072,20 @@ int main(int argc, char **argv) {
   {
     JsonObj peek = parse_flat_json(read_file(spec_path));
     const JsonValue *v = json_find(peek, "output");
-    if (v && v->isString && layoutC.regions.count(v->s)) {
-      outputRegionExclude = v->s;
-      cout << "[note] excluding output region '" << outputRegionExclude
-           << "' from positional input matching\n";
+    if (v && v->isString) {
+      if (layoutC.regions.count(v->s))
+        outputRegionExclude = v->s;
+      else
+        outputRegionExclude = find_region_by_prefix(v->s, layoutC);
+      if (!outputRegionExclude.empty())
+        cout << "[note] excluding output region '" << outputRegionExclude
+             << "' from positional input matching (JSON said '" << v->s
+             << "')\n";
     }
   }
 
-  ArgMap argMap = build_arg_map(fn, active_path, layoutC, correct_raw,
-                                outputRegionExclude);
+  ArgMap argMap =
+      build_arg_map(fn, active_path, layoutC, correct_raw, outputRegionExclude);
   FunctionSpec spec = load_function_spec(fn, spec_path, layoutC, correct_raw,
                                          argMap, variedOverride);
 
@@ -1015,9 +1102,14 @@ int main(int argc, char **argv) {
          << spec.out.start + spec.out.compareIndex << "\n";
 
   string correct_src = strip_bad_asserts(strip_last_assert(correct_raw));
-
+  if (spec.variedIsScalar)
+    correct_src = strip_scalar_pin(correct_src, spec.variedScalarBase, false);
   string anchC;
   vector<string> inputMemC;
+  string variedScalarSymC;
+  if (spec.variedIsScalar)
+    variedScalarSymC =
+        resolve_final_ssa_symbol(correct_src, spec.variedScalarBase, false);
   if (spec.out.scalar) {
     anchC = resolve_final_ssa_symbol(correct_src, spec.out.anchorName, false);
     inputMemC = find_anchor_read_memories(correct_src, anchC);
@@ -1060,7 +1152,12 @@ int main(int argc, char **argv) {
     print_layout(layoutF, "faulty");
 
     string faulty_src = strip_bad_asserts(strip_last_assert(faulty_raw));
-
+    if (spec.variedIsScalar)
+      faulty_src = strip_scalar_pin(faulty_src, spec.variedScalarBase, true);
+    string variedScalarSymF;
+    if (spec.variedIsScalar)
+      variedScalarSymF =
+          resolve_final_ssa_symbol(faulty_src, spec.variedScalarBase, true);
     if (traces_structurally_identical(correct_src, faulty_src)) {
       cout << "[!] WARNING: once _correct/_faulty labels are normalized "
               "away, this faulty trace is IDENTICAL to the correct trace "
@@ -1101,18 +1198,17 @@ int main(int argc, char **argv) {
       // No input to sweep -- fall back to a single-threaded concrete check.
       cout << "[note] no input to vary -- running a single fully-concrete "
               "check instead of a threaded sweep.\n";
-      ValueResult r = check_value(0, spec, c1, f1, c2, f2, inputMemC, inputMemF,
-                                  anchC, anchF, layoutC.finalMem,
-                                  layoutF.finalMem, anonC, anonF);
-      cout << (r.res == sat ? "SAT!\n"
+      ValueResult r =
+          check_value(0, spec, c1, f1, c2, f2, inputMemC, inputMemF, anchC,
+                      anchF, layoutC.finalMem, layoutF.finalMem, anonC, anonF);
+      cout << (r.res == sat     ? "SAT!\n"
                : r.res == unsat ? "UNSAT\n"
-                                 : "UNKNOWN\n");
+                                : "UNKNOWN\n");
       continue;
     }
 
-    cout << "Spawning " << spec.fieldSize
-         << " threads, one per sweep value 0.." << spec.fieldSize - 1
-         << "\n";
+    cout << "Spawning " << spec.fieldSize << " threads, one per sweep value 0.."
+         << spec.fieldSize - 1 << "\n";
 
     vector<ValueResult> results(spec.fieldSize);
     vector<std::thread> threads;
@@ -1141,7 +1237,8 @@ int main(int argc, char **argv) {
     for (auto &r : results) {
       if (r.res != sat)
         continue;
-      cout << "\n================ value " << r.value << " (SAT) ================\n";
+      cout << "\n================ value " << r.value
+           << " (SAT) ================\n";
       cout << "  correct[1] = " << r.c1v << "  faulty[1] = " << r.f1v << "\n";
       cout << "  correct[2] = " << r.c2v << "  faulty[2] = " << r.f2v << "\n";
       if (spec.out.hasExpected) {
@@ -1154,7 +1251,8 @@ int main(int argc, char **argv) {
       }
     }
 
-    cout << "\n================ SWEEP SUMMARY (" << tag << ") ================\n";
+    cout << "\n================ SWEEP SUMMARY (" << tag
+         << ") ================\n";
     cout << "SAT for values:";
     for (int v : satValues)
       cout << " " << v;
@@ -1180,63 +1278,63 @@ int main(int argc, char **argv) {
     if (satValues.empty())
       continue;
 
-    string witness_path = fn_path + "witness_" + tag + ".json";
+    string witness_path = fn_path + "smt_witness_" + tag + ".json";
     ofstream wj(witness_path);
     wj << "{\n";
     wj << "  \"function\": \"" << fn << "\",\n";
     wj << "  \"fault\": \"" << tag << "\",\n";
     wj << "  \"sat_values\": "
        << json_arr(vector<long long>(satValues.begin(), satValues.end()))
-       << ",\n";
-    wj << "  \"trials\": [\n";
-    bool firstTrial = true;
-    for (auto &r : results) {
-      if (r.res != sat)
-        continue;
+       << "\n";
+    // wj << "  \"trials\": [\n";
+    // bool firstTrial = true;
+    // for (auto &r : results) {
+    //   if (r.res != sat)
+    //     continue;
 
-      auto writeInputsObj =
-          [&](std::function<vector<long long>(VariedEntry &)> pick) {
-            wj << "        \"inputs\": {\n";
-            bool ifirst = true;
-            for (auto &fe : r.fixedVals) {
-              wj << (ifirst ? "          " : ",\n          ") << "\""
-                 << fe.name << "\": " << json_arr(fe.vals);
-              ifirst = false;
-            }
-            for (auto &ve : r.variedVals) {
-              wj << (ifirst ? "          " : ",\n          ") << "\""
-                 << ve.name << "\": " << json_arr(pick(ve));
-              ifirst = false;
-            }
-            wj << "\n        }";
-          };
+    //   auto writeInputsObj =
+    //       [&](std::function<vector<long long>(VariedEntry &)> pick) {
+    //         wj << "        \"inputs\": {\n";
+    //         bool ifirst = true;
+    //         for (auto &fe : r.fixedVals) {
+    //           wj << (ifirst ? "          " : ",\n          ") << "\""
+    //              << fe.name << "\": " << json_arr(fe.vals);
+    //           ifirst = false;
+    //         }
+    //         for (auto &ve : r.variedVals) {
+    //           wj << (ifirst ? "          " : ",\n          ") << "\""
+    //              << ve.name << "\": " << json_arr(pick(ve));
+    //           ifirst = false;
+    //         }
+    //         wj << "\n        }";
+    //       };
 
-      wj << (firstTrial ? "    {\n" : ",\n    {\n");
-      wj << "      \"sweep_value\": " << r.value << ",\n";
-      wj << "      \"exec1_ineffective\": {\n";
-      writeInputsObj([](VariedEntry &ve) { return ve.v1; });
-      wj << ",\n";
-      wj << "        \"expected\": {\n";
-      wj << "          \"" << spec.out.label
-         << "_correct\": " << json_arr(r.out1_correct) << ",\n";
-      wj << "          \"" << spec.out.label
-         << "_faulty\": " << json_arr(r.out1_faulty) << "\n";
-      wj << "        }\n";
-      wj << "      },\n";
-      wj << "      \"exec2\": {\n";
-      writeInputsObj([](VariedEntry &ve) { return ve.v2; });
-      wj << ",\n";
-      wj << "        \"expected\": {\n";
-      wj << "          \"" << spec.out.label
-         << "_correct\": " << json_arr(r.out2_correct) << ",\n";
-      wj << "          \"" << spec.out.label
-         << "_faulty\": " << json_arr(r.out2_faulty) << "\n";
-      wj << "        }\n";
-      wj << "      }\n";
-      wj << "    }";
-      firstTrial = false;
-    }
-    wj << "\n  ]\n";
+    //   wj << (firstTrial ? "    {\n" : ",\n    {\n");
+    //   wj << "      \"sweep_value\": " << r.value << ",\n";
+    //   wj << "      \"exec1_ineffective\": {\n";
+    //   writeInputsObj([](VariedEntry &ve) { return ve.v1; });
+    //   wj << ",\n";
+    //   wj << "        \"expected\": {\n";
+    //   wj << "          \"" << spec.out.label
+    //      << "_correct\": " << json_arr(r.out1_correct) << ",\n";
+    //   wj << "          \"" << spec.out.label
+    //      << "_faulty\": " << json_arr(r.out1_faulty) << "\n";
+    //   wj << "        }\n";
+    //   wj << "      },\n";
+    //   wj << "      \"exec2\": {\n";
+    //   writeInputsObj([](VariedEntry &ve) { return ve.v2; });
+    //   wj << ",\n";
+    //   wj << "        \"expected\": {\n";
+    //   wj << "          \"" << spec.out.label
+    //      << "_correct\": " << json_arr(r.out2_correct) << ",\n";
+    //   wj << "          \"" << spec.out.label
+    //      << "_faulty\": " << json_arr(r.out2_faulty) << "\n";
+    //   wj << "        }\n";
+    //   wj << "      }\n";
+    //   wj << "    }";
+    //   firstTrial = false;
+    // }
+    // wj << "\n  ]\n";
     wj << "}\n";
     cout << "[+] witness exported to " << witness_path << "\n";
   }
