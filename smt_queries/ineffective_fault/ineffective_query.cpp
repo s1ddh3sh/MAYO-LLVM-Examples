@@ -1,4 +1,6 @@
 #include "z3++.h"
+#include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -34,7 +36,7 @@ static long long eval_i64(model &m, const expr &e) {
   return m.eval(e, true).simplify().get_numeral_int64();
 }
 
-string read_file(const string &filename) {
+static string read_file(const string &filename) {
   ifstream ifs(filename);
   if (!ifs) {
     cerr << "Cannot open: " << filename << "\n";
@@ -43,8 +45,6 @@ string read_file(const string &filename) {
   return string((istreambuf_iterator<char>(ifs)), istreambuf_iterator<char>());
 }
 
-// Find the index of the ')' matching the '(' at position `open`.
-// Returns string::npos if unbalanced.
 static size_t match_paren(const string &s, size_t open) {
   int depth = 0;
   for (size_t i = open; i < s.size(); i++) {
@@ -59,13 +59,26 @@ static size_t match_paren(const string &s, size_t open) {
   return string::npos;
 }
 
-string strip_bad_asserts(const string &src) {
+static string strip_bad_asserts(const string &src) {
   regex bad_assert(R"(\(assert\s+and\s*\)\s*)");
   return regex_replace(src, bad_assert, "");
 }
 
-string write_suffixed(const string &content, const string &tag,
-                      const string &outDir) {
+// Unconditionally deletes the last top-level (assert ...). In the traces
+// llvmbmc emits this is `(assert (not true))` -- its own final safety
+// check, which would make every query trivially UNSAT.
+static string strip_last_assert(const string &src) {
+  size_t pos = src.rfind("(assert");
+  if (pos == string::npos)
+    return src;
+  size_t end = match_paren(src, pos);
+  if (end == string::npos)
+    return src;
+  return src.substr(0, pos) + src.substr(end + 1);
+}
+
+static string write_suffixed(const string &content, const string &tag,
+                             const string &outDir) {
   string result = content;
   regex ident(R"(\b((?:i|c|b)_\d+_[A-Za-z0-9_.]+)\b)");
   result = regex_replace(result, ident, "$1_" + tag);
@@ -80,132 +93,148 @@ string write_suffixed(const string &content, const string &tag,
   return path;
 }
 
-static string swap_correct_faulty(const string &name) {
-  string result = name;
-  size_t pos = result.rfind("correct");
-  if (pos == string::npos)
-    throw runtime_error("Expected 'correct' in identifier: " + name);
-  result.replace(pos, string("correct").size(), "faulty");
-  return result;
+// =====================================================================
+// Memory layout, parsed from the trace's own comments.
+//
+//     ;; Array Vdec 0 779
+//     ;; Array Ox   780 857
+//     ;; Array s    858 1717
+//     ;; Initial_Memory c_1_Global_M_correct
+//     ;; Final_Memory   c_93_Global_M_correct
+//
+// Ranges are ABSOLUTE indices into the single Global_M array, so there
+// are no per-argument pointer symbols to resolve or pin.
+// =====================================================================
+
+struct MemRegion {
+  string name;
+  long long start = 0;
+  long long end = 0; // inclusive
+  long long size() const { return end - start + 1; }
+};
+
+struct MemoryLayout {
+  map<string, MemRegion> regions;
+  string initialMem;
+  string finalMem;
+};
+
+static string parse_tagged_symbol(const string &src, const string &tag) {
+  regex re(";;\\s*" + tag + "\\s+([A-Za-z0-9_.]+)");
+  smatch m;
+  if (!regex_search(src, m, re))
+    throw runtime_error("Could not find ';; " + tag +
+                        " <symbol>' comment in trace");
+  return m[1].str();
 }
 
-static void assert_no_overlap(solver &slv, context &ctx, expr startA,
-                              long long lenA, expr startB, long long lenB) {
-  expr endA = startA + ctx.int_val((int)lenA);
-  expr endB = startB + ctx.int_val((int)lenB);
-  slv.add(endA <= startB || endB <= startA);
+static MemoryLayout parse_layout(const string &src) {
+  MemoryLayout L;
+  static const regex re(
+      R"(;;\s*Array\s+([A-Za-z_][A-Za-z0-9_.]*)\s+(-?\d+)\s+(-?\d+))");
+  for (auto it = sregex_iterator(src.begin(), src.end(), re),
+            e = sregex_iterator();
+       it != e; ++it) {
+    MemRegion r;
+    r.name = (*it)[1].str();
+    r.start = stoll((*it)[2].str());
+    r.end = stoll((*it)[3].str());
+    if (r.end < r.start)
+      throw runtime_error("Malformed region for '" + r.name + "'");
+    L.regions[r.name] = r;
+  }
+  if (L.regions.empty())
+    throw runtime_error("No ';; Array <name> <start> <end>' comments found");
+
+  L.initialMem = parse_tagged_symbol(src, "Initial_Memory");
+  L.finalMem = parse_tagged_symbol(src, "Final_Memory");
+  return L;
 }
 
-static string find_initial_version(const string &src, const string &base,
-                                   const string &finalVersion) {
-  string current = finalVersion;
+static void split_mem_symbol(const string &sym, string &ver, string &base) {
+  static const regex re(R"(^(c_\d+)_(.+)$)");
+  smatch m;
+  if (!regex_match(sym, m, re))
+    throw runtime_error("Unexpected memory symbol '" + sym + "'");
+  ver = m[1].str();
+  base = m[2].str();
+}
+
+// The ';; Initial_Memory' comment names the formal entry memory, but in
+// these traces the prologue blocks that would copy it forward sit behind
+// path guards that are never asserted true, leaving the whole chain
+// unconstrained. Seeding there has no effect on the computation. Walk back
+// from Final_Memory through the UNGUARDED store chain instead and stop at
+// the first guarded definition: that version is the real input to the
+// straight-line region, and is where inputs must be seeded.
+static string find_effective_initial(const string &src,
+                                     const string &finalSym) {
+  string current, base;
+  split_mem_symbol(finalSym, current, base);
   static const regex numRe(R"(c_(\d+)$)");
   while (true) {
     string target = current + "_" + base;
     size_t defPos = src.find("(= " + target);
     if (defPos == string::npos)
-      return current;
+      return target;
     size_t assertStart = src.rfind("(assert", defPos);
     if (assertStart == string::npos)
-      return current;
+      return target;
 
     string head = src.substr(assertStart, defPos - assertStart);
     if (head.find("(and (=>") != string::npos)
-      return current; // guarded -- this is the true initial version
+      return target; // guarded -- this is the effective initial version
 
     size_t end = match_paren(src, assertStart);
     if (end == string::npos)
-      return current;
+      return target;
     string block = src.substr(assertStart, end - assertStart + 1);
 
     smatch m;
     if (!regex_search(current, m, numRe))
-      return current;
-    int n = stoi(m[1].str());
-    string predName = "c_" + to_string(n - 1);
+      return target;
+    string predName = "c_" + to_string(stoi(m[1].str()) - 1);
     if (block.find(predName) == string::npos)
-      return current;
+      return target;
     current = predName;
   }
 }
 
-// Unconditionally deletes the last top-level (assert ...), regardless of
-// its content. This is llvmbmc's own final safety-check assert, and we
-// never need to parse it: buffer outputs read the true value straight
-// out of the final Global_M array (see FunctionSpec's outputIndexVar),
-// and scalar outputs read it via the __mbc_ret_anchor_<fn> volatile-store
-// anchor (see FunctionSpec's outputAnchorName) -- both survive
-// regardless of whatever shape this trailing assert takes. Always
-// delete it instead of trying to interpret it.
-static string strip_last_assert(const string &src) {
-  size_t pos = src.rfind("(assert");
-  if (pos == string::npos)
-    return src;
-  size_t end = match_paren(src, pos);
-  if (end == string::npos)
-    return src;
-  return src.substr(0, pos) + src.substr(end + 1);
+static void check_layouts_match(const MemoryLayout &a, const MemoryLayout &b) {
+  if (a.regions.size() != b.regions.size())
+    throw runtime_error("correct/faulty traces declare different region counts");
+  for (auto &kv : a.regions) {
+    auto it = b.regions.find(kv.first);
+    if (it == b.regions.end())
+      throw runtime_error("Region '" + kv.first + "' missing from faulty trace");
+    if (it->second.start != kv.second.start || it->second.end != kv.second.end)
+      throw runtime_error("Region '" + kv.first +
+                          "' has different bounds in correct vs faulty trace");
+  }
 }
 
-// =====================================================================
-// Function I/O specification (data-driven replacement for the old
-// hardcoded INPUT_SHARED / INPUT_VARIED / OUTPUT_REGION constants).
-// =====================================================================
-
-enum class ArgKind { Scalar, Buffer };
-enum class ArgRole { FixedInput, VariedInput };
-
-struct ArgSpec {
-  string name; // human-readable / debug label
-  ArgKind kind;
-  ArgRole role;
-  string indexVar; // e.g. "Vdec" -> becomes i_2_Vdec_correct/_faulty in
-                   // the smt2; pass the *base* identifier
-  long long offset = 0;
-  long long length = 0;      // only meaningful for Buffer
-  long long fixedValue = 11; // only meaningful for role == FixedInput
-};
-
-struct FunctionSpec {
-  string fnName;
-  vector<ArgSpec> args;
-
-  bool isScalarOutput = true;
-  string outputAnchorName;    // Scalar only: e.g. "__mbc_ret_anchor_lincomb"
-  string outputIndexVar;      // Buffer only: llvmbmc.var base name
-  long long outputOffset = 0; // Buffer only
-  long long outputLength = 1; // Buffer only -- bytes reported in witness.json
-  string outputLabel;         // JSON key used in witness.json
-};
-
-// A Buffer arg's pointer, pinned equal across correct/faulty and across
-// trials 1/2, plus its region-start address (used for non-overlap).
-struct PinnedBuffer {
-  const ArgSpec *spec;
-  expr pC1, pF1, pC2, pF2;
-  expr startC1;
-};
-
-// Locate the declared SMT identifier for a given llvmbmc.var base name,
-// honoring the fact that llvmbmc numbers these i_<N>_<name>_correct /
-// i_<N>_<name>_faulty and N varies per function. Only safe for
-// identifiers declared ONCE (pointers) -- see resolve_final_ssa_symbol
-// for values re-assigned along the way.
-static string resolve_index_var(const string &src, const string &base,
-                                bool faulty) {
-  string suffix = faulty ? "_faulty" : "_correct";
-  regex re("i_(\\d+)_" + base + suffix);
-  smatch m;
-  if (regex_search(src, m, re))
-    return m[0].str();
-  throw runtime_error("Could not resolve index var for '" + base +
-                      "' (looked for i_<N>_" + base + suffix + ")");
+static void print_layout(const MemoryLayout &L, const string &which) {
+  cout << "[layout:" << which << "] initial=" << L.initialMem
+       << " final=" << L.finalMem << "\n";
+  for (auto &kv : L.regions)
+    cout << "    " << kv.first << " [" << kv.second.start << ".."
+         << kv.second.end << "] (" << kv.second.size() << " bytes)\n";
 }
 
-// Like resolve_index_var, but for identifiers re-declared at multiple
-// SSA versions (e.g. "__mbc_ret_anchor_<fn>"). Returns the occurrence
-// with the highest numeric version -- the value after every guarded
-// assignment has had a chance to apply.
+static const MemRegion &lookup_region(const MemoryLayout &L,
+                                      const string &name) {
+  auto it = L.regions.find(name);
+  if (it == L.regions.end()) {
+    string known;
+    for (auto &kv : L.regions)
+      known += " " + kv.first;
+    throw runtime_error("Array '" + name +
+                        "' is not declared in the trace. Known regions:" +
+                        known);
+  }
+  return it->second;
+}
+
 static string resolve_final_ssa_symbol(const string &src, const string &base,
                                        bool faulty) {
   string suffix = faulty ? "_faulty" : "_correct";
@@ -227,70 +256,325 @@ static string resolve_final_ssa_symbol(const string &src, const string &base,
   return best;
 }
 
-// ---- Example hardcoded specs for the three functions seen so far ----
-static FunctionSpec get_function_spec(const string &fn) {
-  if (fn == "mat_add") {
-    FunctionSpec spec;
-    spec.fnName = "mat_add";
-    spec.args = {
-        {"Vdec", ArgKind::Buffer, ArgRole::FixedInput, "Vdec", 1719, 78, 1},
-        {"Ox", ArgKind::Buffer, ArgRole::VariedInput, "Ox", 1719, 78},
-    };
-    spec.isScalarOutput = false;
-    spec.outputIndexVar = "s";
-    spec.outputOffset = 858;
-    spec.outputLength = 78;
-    return spec;
-  }
-  if (fn == "m_vec_add") {
-    FunctionSpec spec;
-    spec.fnName = "m_vec_add";
-    spec.args = {
-        {"pk", ArgKind::Buffer, ArgRole::VariedInput, "pk", 0, 8},
-        {"accumulator", ArgKind::Buffer, ArgRole::FixedInput, "pk", 0, 8},
-    };
-    spec.isScalarOutput = false;
-    spec.outputIndexVar = "accumulator";
-    spec.outputOffset = 18705;
-    spec.outputLength = 1;
-    return spec;
-  }
-  if (fn == "lincomb") {
-    FunctionSpec spec;
-    spec.fnName = "lincomb";
-    spec.args = {
-        {"a_buf", ArgKind::Buffer, ArgRole::FixedInput, "a_buf", 0, 8, 11},
-        {"x", ArgKind::Buffer, ArgRole::VariedInput, "x", 0, 8},
-    };
-    spec.isScalarOutput = true;
-    spec.outputAnchorName = "__mbc_ret_anchor_lincomb";
-    return spec;
-  }
-  throw runtime_error("No FunctionSpec registered for '" + fn + "'");
+// The trace pins its own scalar args, e.g.
+//     (assert (= i_1___mbc_arg_mat_add_m_correct 78))
+// We only check the JSON agrees, so a stale function_inputs file is caught.
+static bool trace_scalar_arg(const string &src, const string &fn,
+                             const string &key, bool faulty, long long &out) {
+  string suffix = faulty ? "_faulty" : "_correct";
+  regex re("\\(assert\\s*\\(=\\s*i_\\d+___mbc_arg_" + fn + "_" + key + suffix +
+           "\\s+(-?\\d+)\\)\\)");
+  smatch m;
+  if (!regex_search(src, m, re))
+    return false;
+  out = stoll(m[1].str());
+  return true;
 }
 
 // =====================================================================
-// Sweep: try every value 0..15 for `sweepVar` (byte 0 of the first
-// VariedInput), checking satisfiability separately for each. This
-// trades one hard existential search (which Z3 struggles with through
-// the int2bv/bv2int/Array chain) for 16 cheap, fully case-split checks
-// -- each hands the solver a concrete substitution instead of asking it
-// to find one. Treat each SAT result as a confirmed witness for that
-// specific value, not as evidence the solver searched and found it
-// unaided.
-//
-// Prints a summary of which values were SAT, and writes a single
-// combined witness.json covering every SAT value found.
+// Minimal flat-JSON reader for function_inputs/<fn>.json
+//     {"output":"s","Vdec":12,"Ox":11,"s":7,"m":78,"n":1}
 // =====================================================================
+
+struct JsonValue {
+  bool isString = false;
+  string s;
+  long long i = 0;
+};
+
+static map<string, JsonValue> parse_flat_json(const string &text) {
+  map<string, JsonValue> out;
+  size_t i = 0;
+  auto skipws = [&] {
+    while (i < text.size() && isspace((unsigned char)text[i]))
+      i++;
+  };
+
+  skipws();
+  if (i >= text.size() || text[i] != '{')
+    throw runtime_error("JSON: expected '{'");
+  i++;
+  skipws();
+  if (i < text.size() && text[i] == '}')
+    return out;
+
+  while (true) {
+    skipws();
+    if (i >= text.size() || text[i] != '"')
+      throw runtime_error("JSON: expected a quoted key");
+    size_t e = text.find('"', i + 1);
+    if (e == string::npos)
+      throw runtime_error("JSON: unterminated key");
+    string key = text.substr(i + 1, e - i - 1);
+    i = e + 1;
+
+    skipws();
+    if (i >= text.size() || text[i] != ':')
+      throw runtime_error("JSON: expected ':' after key '" + key + "'");
+    i++;
+    skipws();
+
+    JsonValue v;
+    if (i < text.size() && text[i] == '"') {
+      size_t se = text.find('"', i + 1);
+      if (se == string::npos)
+        throw runtime_error("JSON: unterminated string for key '" + key + "'");
+      v.isString = true;
+      v.s = text.substr(i + 1, se - i - 1);
+      i = se + 1;
+    } else {
+      size_t st = i;
+      if (i < text.size() && (text[i] == '-' || text[i] == '+'))
+        i++;
+      while (i < text.size() && isdigit((unsigned char)text[i]))
+        i++;
+      if (st == i)
+        throw runtime_error("JSON: expected a number or string for key '" +
+                            key + "'");
+      v.isString = false;
+      v.s = text.substr(st, i - st);
+      v.i = stoll(v.s);
+    }
+    out[key] = v;
+
+    skipws();
+    if (i < text.size() && text[i] == ',') {
+      i++;
+      continue;
+    }
+    if (i < text.size() && text[i] == '}')
+      break;
+    throw runtime_error("JSON: expected ',' or '}'");
+  }
+  return out;
+}
+
+// =====================================================================
+// Function spec: roles and concrete values from the JSON, addresses and
+// lengths from the trace comments.
+//
+// Recognised keys:
+//   "output"  (string)  output region name, or the scalar return anchor
+//                       base name when it isn't a declared region
+//   "varied"  (string)  optional; which input the sweep varies. The CLI
+//                       argument, when given, overrides this.
+//   "length"  (int)     optional; clamp every buffer to this many bytes
+//   "index"   (int)     optional; output byte the condition is stated over
+//   "q"       (int)     optional; field size. Default 16.
+//   <region>  (int)     byte fill value for that input region
+//   <output>  (int)     expected output value (cross-checked, not asserted)
+//   <scalar>  (int)     value of __mbc_arg_<fn>_<key> (cross-checked)
+// =====================================================================
+
+enum class ArgRole { FixedInput, VariedInput };
+
+struct ResolvedArg {
+  string name;
+  ArgRole role;
+  long long start = 0;
+  long long length = 0;
+  long long fillValue = 0; // meaningful for FixedInput
+};
+
+struct ResolvedOutput {
+  bool scalar = true;
+  string label;
+  string anchorName;
+  long long start = 0;
+  long long length = 1;
+  long long compareIndex = 0;
+  bool hasExpected = false;
+  long long expected = 0;
+};
+
+struct FunctionSpec {
+  string fnName;
+  vector<ResolvedArg> args;
+  ResolvedOutput out;
+  long long fieldSize = 16;
+  bool hasVaried = false;
+};
+
+static FunctionSpec load_function_spec(const string &fn, const string &jsonPath,
+                                       const MemoryLayout &L,
+                                       const string &correct_src,
+                                       const string &variedOverride) {
+  map<string, JsonValue> j = parse_flat_json(read_file(jsonPath));
+
+  FunctionSpec spec;
+  spec.fnName = fn;
+
+  auto getStr = [&](const string &k, string &dst) {
+    auto it = j.find(k);
+    if (it == j.end())
+      return false;
+    if (!it->second.isString)
+      throw runtime_error("JSON key '" + k + "' must be a string");
+    dst = it->second.s;
+    return true;
+  };
+  auto getInt = [&](const string &k, long long &dst) {
+    auto it = j.find(k);
+    if (it == j.end())
+      return false;
+    if (it->second.isString)
+      throw runtime_error("JSON key '" + k + "' must be an integer");
+    dst = it->second.i;
+    return true;
+  };
+
+  string outputName;
+  if (!getStr("output", outputName))
+    throw runtime_error("function_inputs JSON must contain \"output\"");
+
+  // Which input to vary: CLI argument wins over the optional JSON key, so
+  // one spec file can drive several ineffective-fault experiments.
+  string variedName;
+  spec.hasVaried = getStr("varied", variedName);
+  if (!variedOverride.empty()) {
+    if (spec.hasVaried && variedName != variedOverride)
+      cout << "[note] varying '" << variedOverride
+           << "' from the command line, overriding \"varied\":\"" << variedName
+           << "\" in " << jsonPath << "\n";
+    variedName = variedOverride;
+    spec.hasVaried = true;
+  }
+  if (spec.hasVaried && variedName == outputName)
+    throw runtime_error("Cannot vary '" + variedName +
+                        "' -- it is the output region, not an input");
+
+  long long clampLength = 0;
+  getInt("length", clampLength);
+  getInt("q", spec.fieldSize);
+  if (spec.fieldSize < 2)
+    throw runtime_error("Field size q must be >= 2");
+
+  long long compareIndex = 0;
+  getInt("index", compareIndex);
+
+  // ---- output ----
+  spec.out.label = outputName;
+  spec.out.compareIndex = compareIndex;
+  if (L.regions.count(outputName)) {
+    const MemRegion &r = lookup_region(L, outputName);
+    spec.out.scalar = false;
+    spec.out.start = r.start;
+    spec.out.length = clampLength > 0 ? min(clampLength, r.size()) : r.size();
+  } else {
+    spec.out.scalar = true;
+    spec.out.anchorName = outputName;
+    spec.out.length = 1;
+    spec.out.compareIndex = 0;
+  }
+  {
+    auto it = j.find(outputName);
+    if (it != j.end() && !it->second.isString) {
+      spec.out.hasExpected = true;
+      spec.out.expected = it->second.i;
+    }
+  }
+  if (spec.out.compareIndex < 0 || spec.out.compareIndex >= spec.out.length)
+    throw runtime_error("\"index\" out of range for output '" + outputName +
+                        "'");
+
+  // ---- inputs and scalar args ----
+  static const vector<string> reserved = {"output", "varied", "length", "index",
+                                          "q"};
+  bool sawVaried = false;
+  for (auto &kv : j) {
+    const string &key = kv.first;
+    if (find(reserved.begin(), reserved.end(), key) != reserved.end())
+      continue;
+    if (key == outputName)
+      continue;
+
+    if (L.regions.count(key)) {
+      if (kv.second.isString)
+        throw runtime_error("Input '" + key + "' must have an integer value");
+      const MemRegion &r = lookup_region(L, key);
+      ResolvedArg a;
+      a.name = key;
+      a.role = (spec.hasVaried && key == variedName) ? ArgRole::VariedInput
+                                                     : ArgRole::FixedInput;
+      if (a.role == ArgRole::VariedInput)
+        sawVaried = true;
+      a.start = r.start;
+      a.length = clampLength > 0 ? min(clampLength, r.size()) : r.size();
+      a.fillValue = kv.second.i;
+      spec.args.push_back(a);
+      continue;
+    }
+
+    string scalarRegion = "__mbc_arg_" + fn + "_" + key;
+    if (L.regions.count(scalarRegion)) {
+      long long fromTrace = 0;
+      if (trace_scalar_arg(correct_src, fn, key, false, fromTrace)) {
+        if (!kv.second.isString && fromTrace != kv.second.i)
+          throw runtime_error("Scalar arg '" + key + "' is " +
+                              to_string(kv.second.i) + " in " + jsonPath +
+                              " but " + to_string(fromTrace) +
+                              " in the trace -- stale function_inputs file?");
+        cout << "[scalar] " << key << " = " << fromTrace
+             << " (asserted by the trace)\n";
+      } else {
+        cout << "[scalar] " << key
+             << " declared but not pinned in the trace; ignoring\n";
+      }
+      continue;
+    }
+
+    string known;
+    for (auto &r : L.regions)
+      known += " " + r.first;
+    throw runtime_error("JSON key '" + key +
+                        "' matches neither a declared region nor "
+                        "__mbc_arg_" +
+                        fn + "_" + key + ". Known regions:" + known);
+  }
+
+  if (spec.hasVaried && !sawVaried) {
+    string inputs;
+    for (auto &a : spec.args)
+      inputs += " " + a.name;
+    throw runtime_error("'" + variedName +
+                        "' does not name an input in " + jsonPath +
+                        ". Inputs are:" + inputs);
+  }
+  if (spec.args.empty())
+    throw runtime_error("No input regions found in " + jsonPath);
+
+  std::sort(spec.args.begin(), spec.args.end(),
+            [](const ResolvedArg &a, const ResolvedArg &b) {
+              return a.start < b.start;
+            });
+
+  for (size_t i = 0; i + 1 < spec.args.size(); i++)
+    if (spec.args[i].start + spec.args[i].length > spec.args[i + 1].start)
+      throw runtime_error("Inputs '" + spec.args[i].name + "' and '" +
+                          spec.args[i + 1].name + "' overlap in memory");
+
+  return spec;
+}
+
+// =====================================================================
+// Sweep: try every value 0..q-1 for `sweepVar` (byte 0 of the varied
+// input), checking satisfiability separately for each. This trades one
+// hard existential search (which Z3 struggles with through the
+// int2bv/bv2int/Array chain) for q cheap, fully case-split checks -- each
+// hands the solver a concrete substitution instead of asking it to find
+// one. Treat each SAT result as a confirmed witness for that specific
+// value, not as evidence the solver searched and found it unaided.
+// =====================================================================
+
+struct SweepEnv {
+  const FunctionSpec *spec;
+  expr c1v, f1v, c2v, f2v;
+  expr finC1, finF1, finC2, finF2;
+};
+
 static void run_sweep(context &ctx, solver &slv, const expr &sweepVar,
-                      const FunctionSpec &spec, vector<PinnedBuffer> &buffers,
-                      const expr &c1v, const expr &f1v, const expr &c2v,
-                      const expr &f2v, const string &fn, const string &fn_path,
-                      const string &correct_src, const string &faulty_src,
-                      const string &GLOBAL_BASE_CORRECT,
-                      const string &GLOBAL_BASE_FAULTY,
-                      const string &FINAL_VERSION_CORRECT,
-                      const string &FINAL_VERSION_FAULTY, z3::sort &arr_sort) {
+                      const SweepEnv &env, const string &fn,
+                      const string &fn_path) {
   struct FixedVals {
     string name;
     vector<long long> vals;
@@ -300,12 +584,14 @@ static void run_sweep(context &ctx, solver &slv, const expr &sweepVar,
     vector<long long> v1, v2;
   };
 
-  vector<int> satValues;
-  vector<int> unsatValues;
+  const FunctionSpec &spec = *env.spec;
+  const ResolvedOutput &out = spec.out;
+
+  vector<int> satValues, unsatValues;
   ostringstream trialsJson;
   bool firstTrial = true;
 
-  for (int v = 0; v < 16; v++) {
+  for (int v = 0; v < (int)spec.fieldSize; v++) {
     slv.push();
     slv.add(sweepVar == ctx.int_val(v));
 
@@ -318,16 +604,14 @@ static void run_sweep(context &ctx, solver &slv, const expr &sweepVar,
       auto ev = [&](const expr &e) { return m.eval(e, true).simplify(); };
 
       cout << "  -> SAT\n";
-      cout << "  correct[1] = " << ev(c1v) << "  faulty[1] = " << ev(f1v)
+      cout << "  correct[1] = " << ev(env.c1v) << "  faulty[1] = " << ev(env.f1v)
            << "\n";
-      cout << "  correct[2] = " << ev(c2v) << "  faulty[2] = " << ev(f2v)
+      cout << "  correct[2] = " << ev(env.c2v) << "  faulty[2] = " << ev(env.f2v)
            << "\n";
 
-      // ---- collect input/output values for this value's witness entry ----
       vector<FixedVals> fixedInputs;
       vector<VariedVals> variedInputs;
-      for (auto &pb : buffers) {
-        const ArgSpec &a = *pb.spec;
+      for (auto &a : spec.args) {
         if (a.role == ArgRole::FixedInput) {
           FixedVals fv{a.name, {}};
           for (long long i = 0; i < a.length; i++)
@@ -347,48 +631,29 @@ static void run_sweep(context &ctx, solver &slv, const expr &sweepVar,
       }
 
       vector<long long> out1_correct, out1_faulty, out2_correct, out2_faulty;
-      if (spec.isScalarOutput) {
-        out1_correct.push_back(eval_i64(m, c1v));
-        out1_faulty.push_back(eval_i64(m, f1v));
-        out2_correct.push_back(eval_i64(m, c2v));
-        out2_faulty.push_back(eval_i64(m, f2v));
+      if (out.scalar) {
+        out1_correct.push_back(eval_i64(m, env.c1v));
+        out1_faulty.push_back(eval_i64(m, env.f1v));
+        out2_correct.push_back(eval_i64(m, env.c2v));
+        out2_faulty.push_back(eval_i64(m, env.f2v));
       } else {
-        string ovC = resolve_index_var(correct_src, spec.outputIndexVar, false);
-        string ovF = resolve_index_var(faulty_src, spec.outputIndexVar, true);
-        expr outPtrC1 = ctx.int_const((ovC + "_C1").c_str());
-        expr outPtrF1 = ctx.int_const((ovF + "_F1").c_str());
-        expr outPtrC2 = ctx.int_const((ovC + "_C2").c_str());
-        expr outPtrF2 = ctx.int_const((ovF + "_F2").c_str());
-        auto final_arr2 = [&](const string &base, const string &finVer,
-                              const string &tag) {
-          return ctx.constant((finVer + "_" + base + "_" + tag).c_str(),
-                              arr_sort);
-        };
-        expr finC1b =
-            final_arr2(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C1");
-        expr finF1b =
-            final_arr2(GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY, "F1");
-        expr finC2b =
-            final_arr2(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C2");
-        expr finF2b =
-            final_arr2(GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY, "F2");
-        for (long long i = 0; i < spec.outputLength; i++) {
-          expr aC1 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrC1;
-          expr aF1 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrF1;
-          expr aC2 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrC2;
-          expr aF2 = ctx.int_val((int)(spec.outputOffset + i)) + outPtrF2;
-          out1_correct.push_back(eval_i64(m, select(finC1b, aC1)));
-          out1_faulty.push_back(eval_i64(m, select(finF1b, aF1)));
-          out2_correct.push_back(eval_i64(m, select(finC2b, aC2)));
-          out2_faulty.push_back(eval_i64(m, select(finF2b, aF2)));
+        for (long long i = 0; i < out.length; i++) {
+          expr a = ctx.int_val((int)(out.start + i));
+          out1_correct.push_back(eval_i64(m, select(env.finC1, a)));
+          out1_faulty.push_back(eval_i64(m, select(env.finF1, a)));
+          out2_correct.push_back(eval_i64(m, select(env.finC2, a)));
+          out2_faulty.push_back(eval_i64(m, select(env.finF2, a)));
         }
       }
 
-      string outLabel = !spec.outputLabel.empty() ? spec.outputLabel
-                        : spec.isScalarOutput     ? "ret"
-                                                  : spec.outputIndexVar;
+      if (out.hasExpected) {
+        long long got = out1_correct[out.compareIndex];
+        if (got != out.expected)
+          cout << "  [!] expected " << out.label << "[" << out.compareIndex
+               << "] = " << out.expected << " per function_inputs, got " << got
+               << " from the correct trace\n";
+      }
 
-      // ---- append this value's entry to the combined witness JSON ----
       auto writeInputsObj =
           [&](std::function<vector<long long>(VariedVals &)> pick) {
             trialsJson << "        \"inputs\": {\n";
@@ -412,9 +677,9 @@ static void run_sweep(context &ctx, solver &slv, const expr &sweepVar,
       writeInputsObj([](VariedVals &vv) { return vv.v1; });
       trialsJson << ",\n";
       trialsJson << "        \"expected\": {\n";
-      trialsJson << "          \"" << outLabel
+      trialsJson << "          \"" << out.label
                  << "_correct\": " << json_arr(out1_correct) << ",\n";
-      trialsJson << "          \"" << outLabel
+      trialsJson << "          \"" << out.label
                  << "_faulty\": " << json_arr(out1_faulty) << "\n";
       trialsJson << "        }\n";
       trialsJson << "      },\n";
@@ -422,9 +687,9 @@ static void run_sweep(context &ctx, solver &slv, const expr &sweepVar,
       writeInputsObj([](VariedVals &vv) { return vv.v2; });
       trialsJson << ",\n";
       trialsJson << "        \"expected\": {\n";
-      trialsJson << "          \"" << outLabel
+      trialsJson << "          \"" << out.label
                  << "_correct\": " << json_arr(out2_correct) << ",\n";
-      trialsJson << "          \"" << outLabel
+      trialsJson << "          \"" << out.label
                  << "_faulty\": " << json_arr(out2_faulty) << "\n";
       trialsJson << "        }\n";
       trialsJson << "      }\n";
@@ -442,42 +707,74 @@ static void run_sweep(context &ctx, solver &slv, const expr &sweepVar,
     slv.pop();
   }
 
-  // ---- final summary ----
   cout << "\n================ SWEEP SUMMARY ================\n";
   if (satValues.empty()) {
-    cout << "No value 0..15 was SAT for '" << fn << "'.\n";
+    cout << "No value in [0," << spec.fieldSize << ") was SAT for '" << fn
+         << "'.\n";
     return;
   }
   cout << "SAT for values:";
   for (int v : satValues)
     cout << " " << v;
   cout << "\n";
-
   cout << "UNSAT for values:";
   for (int v : unsatValues)
     cout << " " << v;
   cout << "\n";
 
-  string witness_path = fn_path + "witness.json";
-  ofstream wj(witness_path);
-  wj << "{\n";
-  wj << "  \"function\": \"" << fn << "\",\n";
-  wj << "  \"sat_values\": "
-     << json_arr(vector<long long>(satValues.begin(), satValues.end()))
-     << ",\n";
-  wj << "  \"trials\": [\n";
-  wj << trialsJson.str() << "\n";
-  wj << "  ]\n";
-  wj << "}\n";
-  cout << "[+] witness exported to " << witness_path << "\n";
+  // string witness_path = fn_path + "witness.json";
+  // ofstream wj(witness_path);
+  // wj << "{\n";
+  // wj << "  \"function\": \"" << fn << "\",\n";
+  // wj << "  \"sat_values\": "
+  //    << json_arr(vector<long long>(satValues.begin(), satValues.end())) << ",\n";
+  // wj << "  \"trials\": [\n";
+  // wj << trialsJson.str() << "\n";
+  // wj << "  ]\n";
+  // wj << "}\n";
+  // cout << "[+] witness exported to " << witness_path << "\n";
+}
+
+static bool ends_with(const string &s, const string &suf) {
+  return s.size() >= suf.size() &&
+         s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
 }
 
 int main(int argc, char **argv) {
   if (argc < 2) {
-    cerr << "Usage: ./differential_query <fnName>\n";
+    cerr << "Usage: ./ineffective_query <fnName> [variedInput] "
+            "[function_inputs.json]\n"
+            "  e.g. ./ineffective_query mat_add Ox\n"
+            "  variedInput names an input region; every other input stays "
+            "pinned to its function_inputs value.\n";
     return 1;
   }
   string fn = argv[1];
+
+  // Positional args after the function name: a bare name is the input to
+  // vary, anything ending in .json (or containing a path separator) is the
+  // spec file.
+  string variedOverride, spec_path;
+  for (int i = 2; i < argc; i++) {
+    string a = argv[i];
+    if (ends_with(a, ".json") || a.find('/') != string::npos) {
+      if (!spec_path.empty()) {
+        cerr << "Two spec files given: " << spec_path << " and " << a << "\n";
+        return 1;
+      }
+      spec_path = a;
+    } else {
+      if (!variedOverride.empty()) {
+        cerr << "Only one input can be varied (got '" << variedOverride
+             << "' and '" << a << "')\n";
+        return 1;
+      }
+      variedOverride = a;
+    }
+  }
+  if (spec_path.empty())
+    spec_path = "../../function_inputs/" + fn + ".json";
+
   string fn_path = "../../test_mayo/" + fn + "/";
   string correct_path = fn_path + fn + ".smt2";
   string faulty_dir = fn_path + "loopOrFuncSkip/";
@@ -490,25 +787,47 @@ int main(int argc, char **argv) {
     cerr << "No .smt2 file found in " << faulty_dir << "\n";
     return 1;
   }
+  std::sort(faultyCandidates.begin(), faultyCandidates.end());
   string faulty_path = faultyCandidates.front();
+  cout << "[+] correct trace: " << correct_path << "\n";
+  cout << "[+] faulty  trace: " << faulty_path << "\n";
+  cout << "[+] spec:          " << spec_path << "\n";
+  if (!variedOverride.empty())
+    cout << "[+] varying:       " << variedOverride << "\n";
 
-  FunctionSpec spec = get_function_spec(fn);
+  string correct_raw = read_file(correct_path);
+  string faulty_raw = read_file(faulty_path);
 
-  string correct_src =
-      strip_bad_asserts(strip_last_assert(read_file(correct_path)));
-  string faulty_src =
-      strip_bad_asserts(strip_last_assert(read_file(faulty_path)));
+  // Layout comes from the traces themselves -- parse BEFORE stripping, so
+  // the header/footer comments are guaranteed intact.
+  MemoryLayout layoutC = parse_layout(correct_raw);
+  MemoryLayout layoutF = parse_layout(faulty_raw);
+  check_layouts_match(layoutC, layoutF);
+  print_layout(layoutC, "correct");
+  print_layout(layoutF, "faulty");
 
-  static const string FINAL_VERSION_CORRECT =
-      "c_93"; // TODO: derive, not hardcode
-  static const string FINAL_VERSION_FAULTY = "c_93";
-  static const string GLOBAL_BASE_CORRECT = "Global_M_correct";
-  static const string GLOBAL_BASE_FAULTY = "Global_M_faulty";
+  FunctionSpec spec =
+      load_function_spec(fn, spec_path, layoutC, correct_raw, variedOverride);
 
-  string INITIAL_VERSION_CORRECT = find_initial_version(
-      correct_src, GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT);
-  string INITIAL_VERSION_FAULTY = find_initial_version(
-      faulty_src, GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY);
+  for (auto &a : spec.args)
+    cout << "[arg] " << a.name << " "
+         << (a.role == ArgRole::FixedInput ? "fixed=" + to_string(a.fillValue)
+                                           : string("varied"))
+         << " [" << a.start << ".." << a.start + a.length - 1 << "]\n";
+  if (spec.out.scalar)
+    cout << "[out] scalar via anchor " << spec.out.anchorName << "\n";
+  else
+    cout << "[out] " << spec.out.label << " [" << spec.out.start << ".."
+         << spec.out.start + spec.out.length - 1 << "], compare byte "
+         << spec.out.start + spec.out.compareIndex << "\n";
+
+  string correct_src = strip_bad_asserts(strip_last_assert(correct_raw));
+  string faulty_src = strip_bad_asserts(strip_last_assert(faulty_raw));
+
+  string effInitC = find_effective_initial(correct_src, layoutC.finalMem);
+  string effInitF = find_effective_initial(faulty_src, layoutF.finalMem);
+  cout << "[mem] seeding at " << effInitC << " / " << effInitF
+       << " (comment says " << layoutC.initialMem << ")\n";
 
   string c1 = write_suffixed(correct_src, "C1", fn_path);
   string f1 = write_suffixed(faulty_src, "F1", fn_path);
@@ -526,6 +845,7 @@ int main(int argc, char **argv) {
   params p(ctx);
   p.set("timeout", 5000u);
   slv.set(p);
+
   expr_vector C1 = ctx.parse_file(c1.c_str());
   expr_vector F1 = ctx.parse_file(f1.c_str());
   expr_vector C2 = ctx.parse_file(c2.c_str());
@@ -540,75 +860,41 @@ int main(int argc, char **argv) {
     slv.add(e);
 
   z3::sort arr_sort = ctx.array_sort(ctx.int_sort(), ctx.int_sort());
-
-  auto init_arr = [&](const string &base, const string &initVer,
-                      const string &tag) {
-    return ctx.constant((initVer + "_" + base + "_" + tag).c_str(), arr_sort);
+  auto mem = [&](const string &sym, const string &tag) {
+    return ctx.constant((sym + "_" + tag).c_str(), arr_sort);
   };
 
-  expr initC1 = init_arr(GLOBAL_BASE_CORRECT, INITIAL_VERSION_CORRECT, "C1");
-  expr initF1 = init_arr(GLOBAL_BASE_FAULTY, INITIAL_VERSION_FAULTY, "F1");
-  expr initC2 = init_arr(GLOBAL_BASE_CORRECT, INITIAL_VERSION_CORRECT, "C2");
-  expr initF2 = init_arr(GLOBAL_BASE_FAULTY, INITIAL_VERSION_FAULTY, "F2");
+  expr initC1 = mem(effInitC, "C1");
+  expr initF1 = mem(effInitF, "F1");
+  expr initC2 = mem(effInitC, "C2");
+  expr initF2 = mem(effInitF, "F2");
 
   slv.add(initC1 == initF1);
   slv.add(initC2 == initF2);
 
-  // ---- Pin each Buffer arg's pointer equal across correct/faulty and
-  //      across trials 1/2, exactly as the old pin_pointer() did ----
-  vector<PinnedBuffer> buffers;
-
-  for (auto &a : spec.args) {
-    if (a.kind != ArgKind::Buffer)
-      continue;
-    string ivC = resolve_index_var(correct_src, a.indexVar, false);
-    string ivF = resolve_index_var(faulty_src, a.indexVar, true);
-    expr pC1 = ctx.int_const((ivC + "_C1").c_str());
-    expr pF1 = ctx.int_const((ivF + "_F1").c_str());
-    expr pC2 = ctx.int_const((ivC + "_C2").c_str());
-    expr pF2 = ctx.int_const((ivF + "_F2").c_str());
-    slv.add(pC1 == pF1);
-    slv.add(pC1 == pC2);
-    slv.add(pC1 == pF2);
-    expr startC1 = ctx.int_val((int)a.offset) + pC1;
-    buffers.push_back({&a, pC1, pF1, pC2, pF2, startC1});
-  }
-
-  // Non-overlap between every pair of buffer regions.
-  for (size_t i = 0; i < buffers.size(); i++)
-    for (size_t j = i + 1; j < buffers.size(); j++)
-      assert_no_overlap(slv, ctx, buffers[i].startC1, buffers[i].spec->length,
-                        buffers[j].startC1, buffers[j].spec->length);
-
-  // ---- Seed input values per role ----
-  // sweepVar/haveSweepVar: byte 0 of the FIRST VariedInput arg's trial-1
-  // symbol (e.g. "Ox_1_0" for mat_add), captured here so run_sweep() can
-  // iterate it over 0..15 instead of leaving it fully free.
+  // ---- Seed input values per role, at absolute addresses ----
+  // sweepVar: byte 0 of the varied input's trial-1 symbol, so run_sweep()
+  // can iterate it instead of leaving it fully free.
   expr sweepVar = ctx.int_val(0);
   bool haveSweepVar = false;
 
-  for (auto &pb : buffers) {
-    const ArgSpec &a = *pb.spec;
-
-    if (a.role == ArgRole::FixedInput) {
-      for (long long i = 0; i < a.length; i++) {
-        expr addr = ctx.int_val((int)(a.offset + i)) + pb.pC1;
+  for (auto &a : spec.args) {
+    for (long long i = 0; i < a.length; i++) {
+      expr addr = ctx.int_val((int)(a.start + i));
+      if (a.role == ArgRole::FixedInput) {
         expr vi = ctx.int_const((a.name + "_" + to_string(i)).c_str());
         slv.add(select(initC1, addr) == vi);
         slv.add(select(initC2, addr) == vi);
-        slv.add(vi == ctx.int_val((int)a.fixedValue));
-      }
-    } else { // VariedInput
-      for (long long i = 0; i < a.length; i++) {
-        expr addr = ctx.int_val((int)(a.offset + i)) + pb.pC1;
+        slv.add(vi == ctx.int_val((int)a.fillValue));
+      } else {
         expr o1i = ctx.int_const((a.name + "_1_" + to_string(i)).c_str());
         expr o2i = ctx.int_const((a.name + "_2_" + to_string(i)).c_str());
         slv.add(select(initC1, addr) == o1i);
         slv.add(select(initC2, addr) == o2i);
         slv.add(o1i >= ctx.int_val(0));
-        slv.add(o1i < ctx.int_val(16));
+        slv.add(o1i < ctx.int_val((int)spec.fieldSize));
         slv.add(o2i >= ctx.int_val(0));
-        slv.add(o2i < ctx.int_val(16));
+        slv.add(o2i < ctx.int_val((int)spec.fieldSize));
         if (i == 0 && !haveSweepVar) {
           sweepVar = o1i;
           haveSweepVar = true;
@@ -618,72 +904,48 @@ int main(int argc, char **argv) {
   }
 
   // ---- Output symbols ----
+  expr finC1 = mem(layoutC.finalMem, "C1");
+  expr finF1 = mem(layoutF.finalMem, "F1");
+  expr finC2 = mem(layoutC.finalMem, "C2");
+  expr finF2 = mem(layoutF.finalMem, "F2");
+
   expr c1v = ctx.int_val(0), f1v = ctx.int_val(0);
   expr c2v = ctx.int_val(0), f2v = ctx.int_val(0);
 
-  if (spec.isScalarOutput) {
+  if (spec.out.scalar) {
     string anchC =
-        resolve_final_ssa_symbol(correct_src, spec.outputAnchorName, false);
+        resolve_final_ssa_symbol(correct_src, spec.out.anchorName, false);
     string anchF =
-        resolve_final_ssa_symbol(faulty_src, spec.outputAnchorName, true);
+        resolve_final_ssa_symbol(faulty_src, spec.out.anchorName, true);
     c1v = ctx.int_const((anchC + "_C1").c_str());
     f1v = ctx.int_const((anchF + "_F1").c_str());
     c2v = ctx.int_const((anchC + "_C2").c_str());
     f2v = ctx.int_const((anchF + "_F2").c_str());
   } else {
-    string ovC = resolve_index_var(correct_src, spec.outputIndexVar, false);
-    string ovF = resolve_index_var(faulty_src, spec.outputIndexVar, true);
-    expr outPtrC1 = ctx.int_const((ovC + "_C1").c_str());
-    // if (!spec.isScalarOutput) {
-    //   expr sC = ctx.int_const((ovC).c_str()); // or reuse outPtrC1 before offset
-    //   slv.add(outPtrC1 >= 0 && outPtrC1 < ctx.int_val((int)spec.outputLength));
-    // }
-    expr outPtrF1 = ctx.int_const((ovF + "_F1").c_str());
-    expr outPtrC2 = ctx.int_const((ovC + "_C2").c_str());
-    expr outPtrF2 = ctx.int_const((ovF + "_F2").c_str());
-    slv.add(outPtrC1 == outPtrF1);
-    slv.add(outPtrC1 == outPtrC2);
-    slv.add(outPtrC1 == outPtrF2);
-
-    auto final_arr = [&](const string &base, const string &finVer,
-                         const string &tag) {
-      return ctx.constant((finVer + "_" + base + "_" + tag).c_str(), arr_sort);
-    };
-    expr finC1 = final_arr(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C1");
-    expr finF1 = final_arr(GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY, "F1");
-    expr finC2 = final_arr(GLOBAL_BASE_CORRECT, FINAL_VERSION_CORRECT, "C2");
-    expr finF2 = final_arr(GLOBAL_BASE_FAULTY, FINAL_VERSION_FAULTY, "F2");
-
-    expr addrC1 = ctx.int_val((int)spec.outputOffset) + outPtrC1;
-    expr addrF1 = ctx.int_val((int)spec.outputOffset) + outPtrF1;
-    expr addrC2 = ctx.int_val((int)spec.outputOffset) + outPtrC2;
-    expr addrF2 = ctx.int_val((int)spec.outputOffset) + outPtrF2;
-
-    c1v = select(finC1, addrC1);
-    f1v = select(finF1, addrF1);
-    c2v = select(finC2, addrC2);
-    f2v = select(finF2, addrF2);
+    expr addr = ctx.int_val((int)(spec.out.start + spec.out.compareIndex));
+    c1v = select(finC1, addr);
+    f1v = select(finF1, addr);
+    c2v = select(finC2, addr);
+    f2v = select(finF2, addr);
   }
 
-  // Example differential condition (same intent as the original
-  // ineffective_query): fault masked in trial 1, diverges in trial 2.
+  // Ineffective-fault condition: fault masked in trial 1.
   slv.add(c1v == f1v);
-  // slv.add(c2v != f2v);
+  slv.add(c2v != f2v);   // ... and observable in trial 2
 
   cout << "================ SOLVER ================\n";
-  cout << slv.assertions().size() << endl;
+  cout << slv.assertions().size() << " assertions\n";
 
   if (!haveSweepVar) {
-    cerr << "[warning] no VariedInput arg found to sweep over -- falling "
-            "back to a single unconstrained check.\n";
+    cout << "[note] no input to vary (pass one on the command line, e.g. '"
+         << fn << " " << (spec.args.empty() ? "<input>" : spec.args[0].name)
+         << "') -- running a single fully-concrete check instead of a sweep.\n";
     check_result res = slv.check();
     cout << (res == sat ? "SAT!\n" : res == unsat ? "UNSAT\n" : "UNKNOWN\n");
     return res == sat ? 0 : 1;
   }
 
-  run_sweep(ctx, slv, sweepVar, spec, buffers, c1v, f1v, c2v, f2v, fn, fn_path,
-            correct_src, faulty_src, GLOBAL_BASE_CORRECT, GLOBAL_BASE_FAULTY,
-            FINAL_VERSION_CORRECT, FINAL_VERSION_FAULTY, arr_sort);
-
+  SweepEnv env{&spec, c1v, f1v, c2v, f2v, finC1, finF1, finC2, finF2};
+  run_sweep(ctx, slv, sweepVar, env, fn, fn_path);
   return 0;
 }
