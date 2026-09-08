@@ -10,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace z3;
@@ -64,9 +65,6 @@ static string strip_bad_asserts(const string &src) {
   return regex_replace(src, bad_assert, "");
 }
 
-// Unconditionally deletes the last top-level (assert ...). In the traces
-// llvmbmc emits this is `(assert (not true))` -- its own final safety
-// check, which would make every query trivially UNSAT.
 static string strip_last_assert(const string &src) {
   size_t pos = src.rfind("(assert");
   if (pos == string::npos)
@@ -77,10 +75,14 @@ static string strip_last_assert(const string &src) {
   return src.substr(0, pos) + src.substr(end + 1);
 }
 
+// NOTE the trailing `*` (was `+`): llvmbmc emits anonymous temporaries named
+// `i_7_`, `i_12_`, ... with nothing after the final underscore. With `+`
+// those names were left UNSUFFIXED, so the C1/F1/C2/F2 copies collapsed onto
+// the same Z3 constant and were silently forced equal across executions.
 static string write_suffixed(const string &content, const string &tag,
                              const string &outDir) {
   string result = content;
-  regex ident(R"(\b((?:i|c|b)_\d+_[A-Za-z0-9_.]+)\b)");
+  regex ident(R"(\b((?:i|c|b)_\d+_[A-Za-z0-9_.]*)\b)");
   result = regex_replace(result, ident, "$1_" + tag);
 
   string path = outDir + "/" + tag + ".smt2";
@@ -94,16 +96,10 @@ static string write_suffixed(const string &content, const string &tag,
 }
 
 // =====================================================================
-// Memory layout, parsed from the trace's own comments.
-//
-//     ;; Array Vdec 0 779
-//     ;; Array Ox   780 857
-//     ;; Array s    858 1717
-//     ;; Initial_Memory c_1_Global_M_correct
-//     ;; Final_Memory   c_93_Global_M_correct
-//
-// Ranges are ABSOLUTE indices into the single Global_M array, so there
-// are no per-argument pointer symbols to resolve or pin.
+// Memory layout, parsed from the trace's own comments. `order` keeps the
+// declaration order of the ';; Array' lines, which is the order llvmbmc
+// laid the call's arguments out -- that ordering is what lets us match
+// callee parameter names to caller-side region names below.
 // =====================================================================
 
 struct MemRegion {
@@ -115,6 +111,7 @@ struct MemRegion {
 
 struct MemoryLayout {
   map<string, MemRegion> regions;
+  vector<string> order;
   string initialMem;
   string finalMem;
 };
@@ -141,6 +138,8 @@ static MemoryLayout parse_layout(const string &src) {
     r.end = stoll((*it)[3].str());
     if (r.end < r.start)
       throw runtime_error("Malformed region for '" + r.name + "'");
+    if (!L.regions.count(r.name))
+      L.order.push_back(r.name);
     L.regions[r.name] = r;
   }
   if (L.regions.empty())
@@ -160,17 +159,15 @@ static void split_mem_symbol(const string &sym, string &ver, string &base) {
   base = m[2].str();
 }
 
-// The ';; Initial_Memory' comment names the formal entry memory, but in
-// these traces the prologue blocks that would copy it forward sit behind
-// path guards that are never asserted true, leaving the whole chain
-// unconstrained. Seeding there has no effect on the computation. Walk back
-// from Final_Memory through the UNGUARDED store chain instead and stop at
-// the first guarded definition: that version is the real input to the
-// straight-line region, and is where inputs must be seeded.
+// The ';; Initial_Memory' comment names the formal entry memory, but the
+// prologue blocks that would copy it forward sit behind path guards that
+// are never asserted true, leaving that chain unconstrained. Walk back from
+// `startSym` through the UNGUARDED store chain and stop at the first guarded
+// definition: that version is the real input to the straight-line region.
 static string find_effective_initial(const string &src,
-                                     const string &finalSym) {
+                                     const string &startSym) {
   string current, base;
-  split_mem_symbol(finalSym, current, base);
+  split_mem_symbol(startSym, current, base);
   static const regex numRe(R"(c_(\d+)$)");
   while (true) {
     string target = current + "_" + base;
@@ -183,7 +180,7 @@ static string find_effective_initial(const string &src,
 
     string head = src.substr(assertStart, defPos - assertStart);
     if (head.find("(and (=>") != string::npos)
-      return target; // guarded -- this is the effective initial version
+      return target; // guarded -- the effective initial version
 
     size_t end = match_paren(src, assertStart);
     if (end == string::npos)
@@ -198,6 +195,44 @@ static string find_effective_initial(const string &src,
       return target;
     current = predName;
   }
+}
+
+// For a SCALAR output the seed point cannot be derived from Final_Memory:
+// the anchor is computed in a block that may be a sibling of the final store
+// chain rather than an ancestor of it (lincomb reads c_10 while Final_Memory
+// is c_9, both branching off c_5). Take the lowest memory version appearing
+// in the anchor's own defining assert and seed from there.
+static string find_output_read_memory(const string &src,
+                                      const string &anchorSym,
+                                      const string &memBase) {
+  size_t defPos = src.rfind("(= " + anchorSym);
+  if (defPos == string::npos)
+    throw runtime_error("Could not find the defining assert for '" + anchorSym +
+                        "'");
+  size_t assertStart = src.rfind("(assert", defPos);
+  if (assertStart == string::npos)
+    throw runtime_error("Malformed assert around '" + anchorSym + "'");
+  size_t end = match_paren(src, assertStart);
+  if (end == string::npos)
+    throw runtime_error("Unbalanced assert around '" + anchorSym + "'");
+  string block = src.substr(assertStart, end - assertStart + 1);
+
+  regex re("c_(\\d+)_" + memBase);
+  long bestN = -1;
+  string best;
+  for (auto it = sregex_iterator(block.begin(), block.end(), re),
+            e = sregex_iterator();
+       it != e; ++it) {
+    long n = stol((*it)[1].str());
+    if (bestN < 0 || n < bestN) {
+      bestN = n;
+      best = (*it)[0].str();
+    }
+  }
+  if (bestN < 0)
+    throw runtime_error("The defining assert for '" + anchorSym +
+                        "' reads no " + memBase + " version");
+  return best;
 }
 
 static void check_layouts_match(const MemoryLayout &a, const MemoryLayout &b) {
@@ -216,23 +251,11 @@ static void check_layouts_match(const MemoryLayout &a, const MemoryLayout &b) {
 static void print_layout(const MemoryLayout &L, const string &which) {
   cout << "[layout:" << which << "] initial=" << L.initialMem
        << " final=" << L.finalMem << "\n";
-  for (auto &kv : L.regions)
-    cout << "    " << kv.first << " [" << kv.second.start << ".."
-         << kv.second.end << "] (" << kv.second.size() << " bytes)\n";
-}
-
-static const MemRegion &lookup_region(const MemoryLayout &L,
-                                      const string &name) {
-  auto it = L.regions.find(name);
-  if (it == L.regions.end()) {
-    string known;
-    for (auto &kv : L.regions)
-      known += " " + kv.first;
-    throw runtime_error("Array '" + name +
-                        "' is not declared in the trace. Known regions:" +
-                        known);
+  for (auto &n : L.order) {
+    const MemRegion &r = L.regions.at(n);
+    cout << "    " << n << " [" << r.start << ".." << r.end << "] ("
+         << r.size() << " bytes)\n";
   }
-  return it->second;
 }
 
 static string resolve_final_ssa_symbol(const string &src, const string &base,
@@ -256,13 +279,15 @@ static string resolve_final_ssa_symbol(const string &src, const string &base,
   return best;
 }
 
-// The trace pins its own scalar args, e.g.
-//     (assert (= i_1___mbc_arg_mat_add_m_correct 78))
-// We only check the JSON agrees, so a stale function_inputs file is caught.
-static bool trace_scalar_arg(const string &src, const string &fn,
-                             const string &key, bool faulty, long long &out) {
+// A value the trace pins itself, e.g.
+//     (assert (= i_2___mbc_arg_lincomb_n_correct 81))
+//     (assert (= i_1_pqmayo_..._blocker_correct 0))
+// Some of these also have a declared region, but they are scalars, not
+// buffers -- seeding them through memory would be wrong.
+static bool trace_pinned_scalar(const string &src, const string &base,
+                                bool faulty, long long &out) {
   string suffix = faulty ? "_faulty" : "_correct";
-  regex re("\\(assert\\s*\\(=\\s*i_\\d+___mbc_arg_" + fn + "_" + key + suffix +
+  regex re("\\(assert\\s*\\(=\\s*i_\\d+_" + base + suffix +
            "\\s+(-?\\d+)\\)\\)");
   smatch m;
   if (!regex_search(src, m, re))
@@ -272,8 +297,9 @@ static bool trace_scalar_arg(const string &src, const string &fn,
 }
 
 // =====================================================================
-// Minimal flat-JSON reader for function_inputs/<fn>.json
-//     {"output":"s","Vdec":12,"Ox":11,"s":7,"m":78,"n":1}
+// Minimal flat-JSON reader. Insertion order is PRESERVED -- the callee
+// parameter order in active_lengths.json is what we zip against the
+// region declaration order, so it must not be sorted away.
 // =====================================================================
 
 struct JsonValue {
@@ -281,9 +307,17 @@ struct JsonValue {
   string s;
   long long i = 0;
 };
+using JsonObj = vector<pair<string, JsonValue>>;
 
-static map<string, JsonValue> parse_flat_json(const string &text) {
-  map<string, JsonValue> out;
+static const JsonValue *json_find(const JsonObj &o, const string &key) {
+  for (auto &kv : o)
+    if (kv.first == key)
+      return &kv.second;
+  return nullptr;
+}
+
+static JsonObj parse_flat_json(const string &text) {
+  JsonObj out;
   size_t i = 0;
   auto skipws = [&] {
     while (i < text.size() && isspace((unsigned char)text[i]))
@@ -335,7 +369,7 @@ static map<string, JsonValue> parse_flat_json(const string &text) {
       v.s = text.substr(st, i - st);
       v.i = stoll(v.s);
     }
-    out[key] = v;
+    out.push_back({key, v});
 
     skipws();
     if (i < text.size() && text[i] == ',') {
@@ -350,30 +384,125 @@ static map<string, JsonValue> parse_flat_json(const string &text) {
 }
 
 // =====================================================================
-// Function spec: roles and concrete values from the JSON, addresses and
-// lengths from the trace comments.
+// Parameter <-> region mapping.
 //
-// Recognised keys:
-//   "output"  (string)  output region name, or the scalar return anchor
-//                       base name when it isn't a declared region
-//   "varied"  (string)  optional; which input the sweep varies. The CLI
-//                       argument, when given, overrides this.
-//   "length"  (int)     optional; clamp every buffer to this many bytes
-//   "index"   (int)     optional; output byte the condition is stated over
-//   "q"       (int)     optional; field size. Default 16.
-//   <region>  (int)     byte fill value for that input region
-//   <output>  (int)     expected output value (cross-checked, not asserted)
-//   <scalar>  (int)     value of __mbc_arg_<fn>_<key> (cross-checked)
+// The SMT regions carry CALLER-side argument names (a_buf, x) while
+// active_lengths.json carries CALLEE parameter names (a, b), because the
+// two sides of the call use different identifiers:
+//     define ... @lincomb(ptr %a, ptr %b, i32 %n, i32 %m)
+//     call    ... @lincomb(ptr %a_buf, ptr %x, i32 %n_val, i32 %m_val)
+//
+// Scalars need no matching: llvmbmc names their regions after the CALLEE
+// parameter already (__mbc_arg_lincomb_n <- %n). Pointer parameters are
+// matched POSITIONALLY: buffer regions in ';; Array' declaration order are
+// zipped against the non-scalar entries of active_lengths.json in file
+// order. Hence the order-preserving JSON reader above.
+// =====================================================================
+
+struct ArgMap {
+  map<string, string> paramToRegion; // "a" -> "a_buf"
+  map<string, string> regionToParam; // "a_buf" -> "a"
+  map<string, long long> activeLen;  // region name -> active bytes
+};
+
+static bool is_internal_region(const string &name, const string &fn,
+                               const string &src) {
+  if (name == "__mbc_ret_anchor_" + fn)
+    return true;
+  if (name.rfind("__mbc_arg_", 0) == 0)
+    return true;
+  long long dummy;
+  return trace_pinned_scalar(src, name, false, dummy); // e.g. the blocker
+}
+
+static ArgMap build_arg_map(const string &fn, const string &activePath,
+                            const MemoryLayout &L, const string &src,
+                            const string &outputRegionExclude) {
+  ArgMap M;
+
+  // active_lengths.json enumerates the function's CALL arguments as the
+  // qemu pipeline observed them; an output buffer that the function writes
+  // rather than reads an "active length" from is often absent from it even
+  // though it has its own ';; Array' region. Exclude it up front so the
+  // positional zip below only has to account for true inputs.
+  vector<string> bufferRegions;
+  for (auto &n : L.order)
+    if (!is_internal_region(n, fn, src) && n != outputRegionExclude)
+      bufferRegions.push_back(n);
+
+  if (!fs::exists(activePath)) {
+    cout << "[note] no " << activePath
+         << " -- using region names as-is and full region lengths\n";
+    for (auto &n : bufferRegions) {
+      M.paramToRegion[n] = n;
+      M.regionToParam[n] = n;
+    }
+    return M;
+  }
+
+  JsonObj act = parse_flat_json(read_file(activePath));
+
+  vector<pair<string, long long>> bufferParams;
+  for (auto &kv : act) {
+    if (kv.second.isString)
+      throw runtime_error("active_lengths: '" + kv.first +
+                          "' must be an integer");
+    long long dummy;
+    bool isScalar =
+        L.regions.count("__mbc_arg_" + fn + "_" + kv.first) ||
+        trace_pinned_scalar(src, "__mbc_arg_" + fn + "_" + kv.first, false,
+                            dummy);
+    if (isScalar) {
+      M.paramToRegion[kv.first] = "__mbc_arg_" + fn + "_" + kv.first;
+      continue; // scalar: matched by name, length irrelevant
+    }
+    bufferParams.push_back({kv.first, kv.second.i});
+  }
+
+  if (bufferParams.size() != bufferRegions.size()) {
+    string ps, rs;
+    for (auto &p : bufferParams)
+      ps += " " + p.first;
+    for (auto &r : bufferRegions)
+      rs += " " + r;
+    throw runtime_error(
+        "Cannot match parameters to regions positionally: " + activePath +
+        " has " + to_string(bufferParams.size()) + " buffer parameter(s) (" +
+        ps + " ) but the trace declares " + to_string(bufferRegions.size()) +
+        " buffer region(s) (" + rs + " )");
+  }
+
+  for (size_t i = 0; i < bufferParams.size(); i++) {
+    const string &param = bufferParams[i].first;
+    const string &region = bufferRegions[i];
+    M.paramToRegion[param] = region;
+    M.regionToParam[region] = param;
+    long long len = bufferParams[i].second;
+    const MemRegion &r = L.regions.at(region);
+    if (len <= 0 || len > r.size())
+      throw runtime_error("Active length " + to_string(len) + " for '" + param +
+                          "' does not fit region '" + region + "' (" +
+                          to_string(r.size()) + " bytes)");
+    M.activeLen[region] = len;
+    cout << "[map] " << param << " -> " << region << " (" << len
+         << " active bytes of " << r.size() << ")\n";
+  }
+  return M;
+}
+
+// =====================================================================
+// Function spec
 // =====================================================================
 
 enum class ArgRole { FixedInput, VariedInput };
 
 struct ResolvedArg {
-  string name;
+  string name; // region name
+  string param;
   ArgRole role;
   long long start = 0;
   long long length = 0;
-  long long fillValue = 0; // meaningful for FixedInput
+  long long fillValue = 0;
 };
 
 struct ResolvedOutput {
@@ -395,31 +524,44 @@ struct FunctionSpec {
   bool hasVaried = false;
 };
 
+// A JSON key may name either the callee parameter or the region.
+static string resolve_region_name(const string &key, const ArgMap &M,
+                                  const MemoryLayout &L) {
+  auto it = M.paramToRegion.find(key);
+  if (it != M.paramToRegion.end())
+    return it->second;
+  if (L.regions.count(key))
+    return key;
+  return "";
+}
+
 static FunctionSpec load_function_spec(const string &fn, const string &jsonPath,
                                        const MemoryLayout &L,
                                        const string &correct_src,
+                                       const ArgMap &M,
                                        const string &variedOverride) {
-  map<string, JsonValue> j = parse_flat_json(read_file(jsonPath));
+  JsonObj j = parse_flat_json(read_file(jsonPath));
 
   FunctionSpec spec;
   spec.fnName = fn;
+  const string anchorRegion = "__mbc_ret_anchor_" + fn;
 
   auto getStr = [&](const string &k, string &dst) {
-    auto it = j.find(k);
-    if (it == j.end())
+    const JsonValue *v = json_find(j, k);
+    if (!v)
       return false;
-    if (!it->second.isString)
+    if (!v->isString)
       throw runtime_error("JSON key '" + k + "' must be a string");
-    dst = it->second.s;
+    dst = v->s;
     return true;
   };
   auto getInt = [&](const string &k, long long &dst) {
-    auto it = j.find(k);
-    if (it == j.end())
+    const JsonValue *v = json_find(j, k);
+    if (!v)
       return false;
-    if (it->second.isString)
+    if (v->isString)
       throw runtime_error("JSON key '" + k + "' must be an integer");
-    dst = it->second.i;
+    dst = v->i;
     return true;
   };
 
@@ -427,23 +569,20 @@ static FunctionSpec load_function_spec(const string &fn, const string &jsonPath,
   if (!getStr("output", outputName))
     throw runtime_error("function_inputs JSON must contain \"output\"");
 
-  // Which input to vary: CLI argument wins over the optional JSON key, so
-  // one spec file can drive several ineffective-fault experiments.
   string variedName;
   spec.hasVaried = getStr("varied", variedName);
   if (!variedOverride.empty()) {
     if (spec.hasVaried && variedName != variedOverride)
       cout << "[note] varying '" << variedOverride
            << "' from the command line, overriding \"varied\":\"" << variedName
-           << "\" in " << jsonPath << "\n";
+           << "\"\n";
     variedName = variedOverride;
     spec.hasVaried = true;
   }
-  if (spec.hasVaried && variedName == outputName)
-    throw runtime_error("Cannot vary '" + variedName +
-                        "' -- it is the output region, not an input");
+  string variedRegion =
+      spec.hasVaried ? resolve_region_name(variedName, M, L) : "";
 
-  long long clampLength = 0;
+  long long clampLength = 0; // optional global override
   getInt("length", clampLength);
   getInt("q", spec.fieldSize);
   if (spec.fieldSize < 2)
@@ -452,32 +591,50 @@ static FunctionSpec load_function_spec(const string &fn, const string &jsonPath,
   long long compareIndex = 0;
   getInt("index", compareIndex);
 
+  auto lengthFor = [&](const string &region) {
+    const MemRegion &r = L.regions.at(region);
+    if (clampLength > 0)
+      return min(clampLength, r.size());
+    auto it = M.activeLen.find(region);
+    if (it != M.activeLen.end())
+      return it->second;
+    return r.size();
+  };
+
   // ---- output ----
+  string outRegion = resolve_region_name(outputName, M, L);
   spec.out.label = outputName;
   spec.out.compareIndex = compareIndex;
-  if (L.regions.count(outputName)) {
-    const MemRegion &r = lookup_region(L, outputName);
-    spec.out.scalar = false;
-    spec.out.start = r.start;
-    spec.out.length = clampLength > 0 ? min(clampLength, r.size()) : r.size();
-  } else {
+  bool outIsAnchor = outRegion.empty() || outRegion == anchorRegion;
+  if (outIsAnchor) {
+    // A scalar function has exactly one possible return anchor, so
+    // whatever label the JSON used ("c", "ret", ...) is purely cosmetic --
+    // always resolve to the trace's real anchor region, never the literal
+    // string the caller wrote.
     spec.out.scalar = true;
-    spec.out.anchorName = outputName;
+    spec.out.anchorName = anchorRegion;
     spec.out.length = 1;
     spec.out.compareIndex = 0;
+  } else {
+    const MemRegion &r = L.regions.at(outRegion);
+    spec.out.scalar = false;
+    spec.out.start = r.start;
+    spec.out.length = lengthFor(outRegion);
   }
   {
-    auto it = j.find(outputName);
-    if (it != j.end() && !it->second.isString) {
+    const JsonValue *v = json_find(j, outputName);
+    if (v && !v->isString) {
       spec.out.hasExpected = true;
-      spec.out.expected = it->second.i;
+      spec.out.expected = v->i;
     }
   }
   if (spec.out.compareIndex < 0 || spec.out.compareIndex >= spec.out.length)
     throw runtime_error("\"index\" out of range for output '" + outputName +
                         "'");
+  if (spec.hasVaried && !outIsAnchor && variedRegion == outRegion)
+    throw runtime_error("Cannot vary '" + variedName + "' -- it is the output");
 
-  // ---- inputs and scalar args ----
+  // ---- inputs and scalars ----
   static const vector<string> reserved = {"output", "varied", "length", "index",
                                           "q"};
   bool sawVaried = false;
@@ -485,60 +642,65 @@ static FunctionSpec load_function_spec(const string &fn, const string &jsonPath,
     const string &key = kv.first;
     if (find(reserved.begin(), reserved.end(), key) != reserved.end())
       continue;
-    if (key == outputName)
+    if (key == outputName || key == anchorRegion)
       continue;
 
-    if (L.regions.count(key)) {
+    // 1. scalar pinned by the trace (by param name or __mbc_arg_<fn>_<key>)
+    long long fromTrace = 0;
+    string scalarBase;
+    if (trace_pinned_scalar(correct_src, key, false, fromTrace))
+      scalarBase = key;
+    else if (trace_pinned_scalar(correct_src, "__mbc_arg_" + fn + "_" + key,
+                                 false, fromTrace))
+      scalarBase = "__mbc_arg_" + fn + "_" + key;
+    if (!scalarBase.empty()) {
+      if (!kv.second.isString && fromTrace != kv.second.i)
+        throw runtime_error("Scalar '" + key + "' is " +
+                            to_string(kv.second.i) + " in " + jsonPath +
+                            " but " + to_string(fromTrace) +
+                            " in the trace -- stale function_inputs file?");
+      cout << "[scalar] " << key << " = " << fromTrace << " (pinned as "
+           << scalarBase << ")\n";
+      continue;
+    }
+
+    // 2. buffer, named either by callee parameter or by region
+    string region = resolve_region_name(key, M, L);
+    if (!region.empty()) {
       if (kv.second.isString)
         throw runtime_error("Input '" + key + "' must have an integer value");
-      const MemRegion &r = lookup_region(L, key);
+      const MemRegion &r = L.regions.at(region);
       ResolvedArg a;
-      a.name = key;
-      a.role = (spec.hasVaried && key == variedName) ? ArgRole::VariedInput
-                                                     : ArgRole::FixedInput;
+      a.name = region;
+      auto pit = M.regionToParam.find(region);
+      a.param = pit != M.regionToParam.end() ? pit->second : region;
+      a.role = (spec.hasVaried && region == variedRegion)
+                   ? ArgRole::VariedInput
+                   : ArgRole::FixedInput;
       if (a.role == ArgRole::VariedInput)
         sawVaried = true;
       a.start = r.start;
-      a.length = clampLength > 0 ? min(clampLength, r.size()) : r.size();
+      a.length = lengthFor(region);
       a.fillValue = kv.second.i;
       spec.args.push_back(a);
       continue;
     }
 
-    string scalarRegion = "__mbc_arg_" + fn + "_" + key;
-    if (L.regions.count(scalarRegion)) {
-      long long fromTrace = 0;
-      if (trace_scalar_arg(correct_src, fn, key, false, fromTrace)) {
-        if (!kv.second.isString && fromTrace != kv.second.i)
-          throw runtime_error("Scalar arg '" + key + "' is " +
-                              to_string(kv.second.i) + " in " + jsonPath +
-                              " but " + to_string(fromTrace) +
-                              " in the trace -- stale function_inputs file?");
-        cout << "[scalar] " << key << " = " << fromTrace
-             << " (asserted by the trace)\n";
-      } else {
-        cout << "[scalar] " << key
-             << " declared but not pinned in the trace; ignoring\n";
-      }
-      continue;
-    }
-
     string known;
-    for (auto &r : L.regions)
-      known += " " + r.first;
+    for (auto &n : L.order)
+      known += " " + n;
     throw runtime_error("JSON key '" + key +
-                        "' matches neither a declared region nor "
-                        "__mbc_arg_" +
-                        fn + "_" + key + ". Known regions:" + known);
+                        "' is neither a trace-pinned scalar nor a known "
+                        "parameter/region. Regions:" +
+                        known);
   }
 
   if (spec.hasVaried && !sawVaried) {
     string inputs;
     for (auto &a : spec.args)
-      inputs += " " + a.name;
-    throw runtime_error("'" + variedName +
-                        "' does not name an input in " + jsonPath +
-                        ". Inputs are:" + inputs);
+      inputs += " " + a.param + "(" + a.name + ")";
+    throw runtime_error("'" + variedName + "' does not name an input. Inputs:" +
+                        inputs);
   }
   if (spec.args.empty())
     throw runtime_error("No input regions found in " + jsonPath);
@@ -547,7 +709,6 @@ static FunctionSpec load_function_spec(const string &fn, const string &jsonPath,
             [](const ResolvedArg &a, const ResolvedArg &b) {
               return a.start < b.start;
             });
-
   for (size_t i = 0; i + 1 < spec.args.size(); i++)
     if (spec.args[i].start + spec.args[i].length > spec.args[i + 1].start)
       throw runtime_error("Inputs '" + spec.args[i].name + "' and '" +
@@ -557,13 +718,10 @@ static FunctionSpec load_function_spec(const string &fn, const string &jsonPath,
 }
 
 // =====================================================================
-// Sweep: try every value 0..q-1 for `sweepVar` (byte 0 of the varied
-// input), checking satisfiability separately for each. This trades one
-// hard existential search (which Z3 struggles with through the
-// int2bv/bv2int/Array chain) for q cheap, fully case-split checks -- each
-// hands the solver a concrete substitution instead of asking it to find
-// one. Treat each SAT result as a confirmed witness for that specific
-// value, not as evidence the solver searched and found it unaided.
+// Sweep over the varied input's byte 0. Trades one hard existential search
+// for q cheap, fully case-split checks -- each hands the solver a concrete
+// substitution instead of asking it to find one. Treat each SAT as a
+// confirmed witness for that value, not as evidence the solver searched.
 // =====================================================================
 
 struct SweepEnv {
@@ -721,18 +879,22 @@ static void run_sweep(context &ctx, solver &slv, const expr &sweepVar,
   for (int v : unsatValues)
     cout << " " << v;
   cout << "\n";
+  if ((long long)satValues.size() == spec.fieldSize)
+    cout << "[!] every value was SAT -- the compared outputs are probably not "
+            "determined by the seeded inputs; check the seed point and look "
+            "for unconstrained i_<N>_ temporaries in the trace.\n";
 
-  // string witness_path = fn_path + "witness.json";
-  // ofstream wj(witness_path);
-  // wj << "{\n";
-  // wj << "  \"function\": \"" << fn << "\",\n";
-  // wj << "  \"sat_values\": "
-  //    << json_arr(vector<long long>(satValues.begin(), satValues.end())) << ",\n";
-  // wj << "  \"trials\": [\n";
-  // wj << trialsJson.str() << "\n";
-  // wj << "  ]\n";
-  // wj << "}\n";
-  // cout << "[+] witness exported to " << witness_path << "\n";
+  string witness_path = fn_path + "witness.json";
+  ofstream wj(witness_path);
+  wj << "{\n";
+  wj << "  \"function\": \"" << fn << "\",\n";
+  wj << "  \"sat_values\": "
+     << json_arr(vector<long long>(satValues.begin(), satValues.end())) << ",\n";
+  wj << "  \"trials\": [\n";
+  wj << trialsJson.str() << "\n";
+  wj << "  ]\n";
+  wj << "}\n";
+  cout << "[+] witness exported to " << witness_path << "\n";
 }
 
 static bool ends_with(const string &s, const string &suf) {
@@ -744,16 +906,11 @@ int main(int argc, char **argv) {
   if (argc < 2) {
     cerr << "Usage: ./ineffective_query <fnName> [variedInput] "
             "[function_inputs.json]\n"
-            "  e.g. ./ineffective_query mat_add Ox\n"
-            "  variedInput names an input region; every other input stays "
-            "pinned to its function_inputs value.\n";
+            "  e.g. ./ineffective_query lincomb b\n";
     return 1;
   }
   string fn = argv[1];
 
-  // Positional args after the function name: a bare name is the input to
-  // vary, anything ending in .json (or containing a path separator) is the
-  // spec file.
   string variedOverride, spec_path;
   for (int i = 2; i < argc; i++) {
     string a = argv[i];
@@ -778,6 +935,7 @@ int main(int argc, char **argv) {
   string fn_path = "../../test_mayo/" + fn + "/";
   string correct_path = fn_path + fn + ".smt2";
   string faulty_dir = fn_path + "loopOrFuncSkip/";
+  string active_path = fn_path + "active_lengths.json";
 
   vector<string> faultyCandidates;
   for (const auto &entry : fs::directory_iterator(faulty_dir))
@@ -789,28 +947,43 @@ int main(int argc, char **argv) {
   }
   std::sort(faultyCandidates.begin(), faultyCandidates.end());
   string faulty_path = faultyCandidates.front();
-  cout << "[+] correct trace: " << correct_path << "\n";
-  cout << "[+] faulty  trace: " << faulty_path << "\n";
-  cout << "[+] spec:          " << spec_path << "\n";
+  cout << "[+] correct trace:  " << correct_path << "\n";
+  cout << "[+] faulty  trace:  " << faulty_path << "\n";
+  cout << "[+] spec:           " << spec_path << "\n";
+  cout << "[+] active lengths: " << active_path << "\n";
   if (!variedOverride.empty())
-    cout << "[+] varying:       " << variedOverride << "\n";
+    cout << "[+] varying:        " << variedOverride << "\n";
 
   string correct_raw = read_file(correct_path);
   string faulty_raw = read_file(faulty_path);
 
-  // Layout comes from the traces themselves -- parse BEFORE stripping, so
-  // the header/footer comments are guaranteed intact.
   MemoryLayout layoutC = parse_layout(correct_raw);
   MemoryLayout layoutF = parse_layout(faulty_raw);
   check_layouts_match(layoutC, layoutF);
   print_layout(layoutC, "correct");
   print_layout(layoutF, "faulty");
 
-  FunctionSpec spec =
-      load_function_spec(fn, spec_path, layoutC, correct_raw, variedOverride);
+  // Peek at "output" before building the arg map, so a buffer output that
+  // shares its region's exact name can be excluded from the positional
+  // input-parameter match (see build_arg_map).
+  string outputRegionExclude;
+  {
+    JsonObj peek = parse_flat_json(read_file(spec_path));
+    const JsonValue *v = json_find(peek, "output");
+    if (v && v->isString && layoutC.regions.count(v->s)) {
+      outputRegionExclude = v->s;
+      cout << "[note] excluding output region '" << outputRegionExclude
+           << "' from positional input matching\n";
+    }
+  }
+
+  ArgMap argMap = build_arg_map(fn, active_path, layoutC, correct_raw,
+                                outputRegionExclude);
+  FunctionSpec spec = load_function_spec(fn, spec_path, layoutC, correct_raw,
+                                         argMap, variedOverride);
 
   for (auto &a : spec.args)
-    cout << "[arg] " << a.name << " "
+    cout << "[arg] " << a.param << " (" << a.name << ") "
          << (a.role == ArgRole::FixedInput ? "fixed=" + to_string(a.fillValue)
                                            : string("varied"))
          << " [" << a.start << ".." << a.start + a.length - 1 << "]\n";
@@ -824,8 +997,20 @@ int main(int argc, char **argv) {
   string correct_src = strip_bad_asserts(strip_last_assert(correct_raw));
   string faulty_src = strip_bad_asserts(strip_last_assert(faulty_raw));
 
-  string effInitC = find_effective_initial(correct_src, layoutC.finalMem);
-  string effInitF = find_effective_initial(faulty_src, layoutF.finalMem);
+  string anchC, anchF;
+  string seedStartC = layoutC.finalMem, seedStartF = layoutF.finalMem;
+  if (spec.out.scalar) {
+    anchC = resolve_final_ssa_symbol(correct_src, spec.out.anchorName, false);
+    anchF = resolve_final_ssa_symbol(faulty_src, spec.out.anchorName, true);
+    string verC, baseC, verF, baseF;
+    split_mem_symbol(layoutC.finalMem, verC, baseC);
+    split_mem_symbol(layoutF.finalMem, verF, baseF);
+    seedStartC = find_output_read_memory(correct_src, anchC, baseC);
+    seedStartF = find_output_read_memory(faulty_src, anchF, baseF);
+    cout << "[mem] anchor " << anchC << " reads " << seedStartC << "\n";
+  }
+  string effInitC = find_effective_initial(correct_src, seedStartC);
+  string effInitF = find_effective_initial(faulty_src, seedStartF);
   cout << "[mem] seeding at " << effInitC << " / " << effInitF
        << " (comment says " << layoutC.initialMem << ")\n";
 
@@ -842,9 +1027,9 @@ int main(int argc, char **argv) {
   tactic pipeline = simp & prop & eqs & core;
 
   solver slv = pipeline.mk_solver();
-  params p(ctx);
-  p.set("timeout", 5000u);
-  slv.set(p);
+  // params p(ctx);
+  // p.set("timeout", 5000u);
+  // slv.set(p);
 
   expr_vector C1 = ctx.parse_file(c1.c_str());
   expr_vector F1 = ctx.parse_file(f1.c_str());
@@ -872,9 +1057,6 @@ int main(int argc, char **argv) {
   slv.add(initC1 == initF1);
   slv.add(initC2 == initF2);
 
-  // ---- Seed input values per role, at absolute addresses ----
-  // sweepVar: byte 0 of the varied input's trial-1 symbol, so run_sweep()
-  // can iterate it instead of leaving it fully free.
   expr sweepVar = ctx.int_val(0);
   bool haveSweepVar = false;
 
@@ -903,7 +1085,6 @@ int main(int argc, char **argv) {
     }
   }
 
-  // ---- Output symbols ----
   expr finC1 = mem(layoutC.finalMem, "C1");
   expr finF1 = mem(layoutF.finalMem, "F1");
   expr finC2 = mem(layoutC.finalMem, "C2");
@@ -913,10 +1094,6 @@ int main(int argc, char **argv) {
   expr c2v = ctx.int_val(0), f2v = ctx.int_val(0);
 
   if (spec.out.scalar) {
-    string anchC =
-        resolve_final_ssa_symbol(correct_src, spec.out.anchorName, false);
-    string anchF =
-        resolve_final_ssa_symbol(faulty_src, spec.out.anchorName, true);
     c1v = ctx.int_const((anchC + "_C1").c_str());
     f1v = ctx.int_const((anchF + "_F1").c_str());
     c2v = ctx.int_const((anchC + "_C2").c_str());
@@ -931,15 +1108,14 @@ int main(int argc, char **argv) {
 
   // Ineffective-fault condition: fault masked in trial 1.
   slv.add(c1v == f1v);
-  slv.add(c2v != f2v);   // ... and observable in trial 2
+  // slv.add(c2v != f2v);   // ... and observable in trial 2
 
   cout << "================ SOLVER ================\n";
   cout << slv.assertions().size() << " assertions\n";
 
   if (!haveSweepVar) {
-    cout << "[note] no input to vary (pass one on the command line, e.g. '"
-         << fn << " " << (spec.args.empty() ? "<input>" : spec.args[0].name)
-         << "') -- running a single fully-concrete check instead of a sweep.\n";
+    cout << "[note] no input to vary -- running a single fully-concrete "
+            "check instead of a sweep.\n";
     check_result res = slv.check();
     cout << (res == sat ? "SAT!\n" : res == unsat ? "UNSAT\n" : "UNKNOWN\n");
     return res == sat ? 0 : 1;
