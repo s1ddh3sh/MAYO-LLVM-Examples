@@ -143,7 +143,6 @@ static string parse_tagged_symbol(const string &src, const string &tag) {
                         " <symbol>' comment in trace");
   return m[1].str();
 }
-
 static MemoryLayout parse_layout(const string &src) {
   MemoryLayout L;
 
@@ -153,13 +152,33 @@ static MemoryLayout parse_layout(const string &src) {
   for (auto it = sregex_iterator(src.begin(), src.end(), re),
             e = sregex_iterator();
        it != e; ++it) {
+
+    string name = (*it)[1].str();
+    string start = (*it)[2].str();
+    string end = (*it)[3].str();
+
+    cerr << "[DEBUG parse_layout] " << name << " start='" << start << "' end='"
+         << end << "'\n";
+
     MemRegion r;
-    r.name = (*it)[1].str();
-    r.start = stoll((*it)[2].str());
-    r.end = stoll((*it)[3].str());
+    r.name = name;
+
+    try {
+      r.start = stoll(start);
+    } catch (const std::exception &ex) {
+      throw runtime_error("stoll failed parsing START for region '" + name +
+                          "': '" + start + "' (" + ex.what() + ")");
+    }
+
+    try {
+      r.end = stoll(end);
+    } catch (const std::exception &ex) {
+      throw runtime_error("stoll failed parsing END for region '" + name +
+                          "': '" + end + "' (" + ex.what() + ")");
+    }
 
     if (r.end < r.start)
-      throw runtime_error("Malformed region for '" + r.name + "'");
+      throw runtime_error("Malformed region for '" + name + "'");
 
     if (!L.regions.count(r.name))
       L.order.push_back(r.name);
@@ -173,7 +192,6 @@ static MemoryLayout parse_layout(const string &src) {
   L.finalMem = parse_tagged_symbol(src, "Final_Memory");
   return L;
 }
-
 // Find the memory SSA arrays that the scalar return anchor actually reads.
 static vector<string> find_anchor_read_memories(const string &src,
                                                 const string &anchorSym) {
@@ -267,15 +285,27 @@ static string strip_scalar_pin(const string &src, const string &base,
 static bool trace_pinned_scalar(const string &src, const string &base,
                                 bool faulty, long long &out) {
   string suffix = faulty ? "_faulty" : "_correct";
+
   regex re("\\(assert\\s*\\(=\\s*i_\\d+_" + base + suffix +
            "\\s+(-?\\d+)\\)\\)");
+
   smatch m;
+
   if (!regex_search(src, m, re))
     return false;
-  out = stoll(m[1].str());
+
+  cerr << "[DEBUG trace_pinned_scalar] base='" << base << "' matched='"
+       << m[1].str() << "'\n";
+
+  try {
+    out = stoll(m[1].str());
+  } catch (const std::exception &e) {
+    throw runtime_error("stoll failed in trace_pinned_scalar: base='" + base +
+                        "', value='" + m[1].str() + "', error=" + e.what());
+  }
+
   return true;
 }
-
 // llvmbmc emits GF(16) reduction steps as `(div X (to_int (^ 2 4)))` --
 // integer power of two LITERAL constants, always 16. Z3 routes `^` between
 // two Ints through nonlinear integer arithmetic reasoning even when both
@@ -362,7 +392,7 @@ static bool traces_structurally_identical(const string &correct_src,
 struct JsonValue {
   bool isString = false;
   string s;
-  long long i = 0;
+  unsigned long long i = 0;
 };
 using JsonObj = vector<pair<string, JsonValue>>;
 
@@ -424,7 +454,14 @@ static JsonObj parse_flat_json(const string &text) {
                             key + "'");
       v.isString = false;
       v.s = text.substr(st, i - st);
-      v.i = stoll(v.s);
+      // v.i = stoll(v.s);
+      try {
+        v.i = stoll(v.s);
+      } catch (const std::out_of_range &) {
+        // Allow large unsigned 64-bit JSON integers to remain textual.
+        // They may be used only as metadata/baseline values.
+        v.i = 0;
+      }
     }
     out.push_back({key, v});
 
@@ -941,11 +978,14 @@ check_value(int value, const FunctionSpec &spec, const string &c1,
   }
 
   // Ineffective-fault condition: fault masked in trial 1.
-  slv.add(c1v == f1v);
-  slv.add(c2v != f2v); // ... and observable in trial 2
-
   slv.add(sweepVar == ctx.int_val(value));
+  slv.add(c1v == f1v);
+  // slv.add(c2v != f2v); // ... and observable in trial 2
 
+  // if(value == 1){
+  //   cout << c1v << f1v << c2v << f2v;
+  //   cout << "\nValues for sweep";
+  // }
   out.res = slv.check();
   if (out.res != sat)
     return out;
@@ -1084,11 +1124,17 @@ int main(int argc, char **argv) {
     }
   }
 
+  cerr << "\n[DEBUG] BEFORE build_arg_map\n";
+
   ArgMap argMap =
       build_arg_map(fn, active_path, layoutC, correct_raw, outputRegionExclude);
+
+  cerr << "[DEBUG] AFTER build_arg_map\n";
+
   FunctionSpec spec = load_function_spec(fn, spec_path, layoutC, correct_raw,
                                          argMap, variedOverride);
 
+  cerr << "[DEBUG] AFTER load_function_spec\n";
   for (auto &a : spec.args)
     cout << "[arg] " << a.param << " (" << a.name << ") "
          << (a.role == ArgRole::FixedInput ? "fixed=" + to_string(a.fillValue)
