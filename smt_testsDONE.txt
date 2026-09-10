@@ -1,1 +1,1 @@
-mat_add, lincomb (doubt), m_vec_add 
+mat_add, lincomb (doubt), m_vec_add

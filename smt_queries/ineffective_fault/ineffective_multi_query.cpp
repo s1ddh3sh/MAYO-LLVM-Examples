@@ -499,12 +499,40 @@ static bool is_internal_region(const string &name, const string &fn,
 
 static ArgMap build_arg_map(const string &fn, const string &activePath,
                             const MemoryLayout &L, const string &src,
+                            const string &outputName,
                             const string &outputRegionExclude) {
+  // Pointer arguments are matched in declaration order. For m_vec_mul_add:
+  //   arg 1: in  -> sk
+  //   arg 3: acc -> Pv (output)
+  // The Array comments contain physical region names, not C argument names.
   ArgMap M;
 
-  vector<string> bufferRegions;
+  vector<string> allBufferRegions;
   for (auto &n : L.order)
-    if (!is_internal_region(n, fn, src) && n != outputRegionExclude)
+    if (!is_internal_region(n, fn, src))
+      allBufferRegions.push_back(n);
+
+  // If the output name is not present in the trace layout (e.g. acc versus
+  // the physical region Pv), use pointer-argument order. The output is the
+  // last pointer argument for m_vec_mul_add, hence the last region.
+  string outputRegion = outputRegionExclude;
+  if (outputRegion.empty() && !allBufferRegions.empty()) {
+    outputRegion = allBufferRegions.back();
+    cout << "[note] output '" << outputName
+         << "' is not named in the trace layout; treating last non-internal "
+            "region '"
+         << outputRegion << "' as the output by argument order\n";
+  }
+
+  // Record both directions so load_function_spec() can resolve "acc" -> Pv.
+  if (!outputRegion.empty()) {
+    M.paramToRegion[outputName] = outputRegion;
+    M.regionToParam[outputRegion] = outputName;
+  }
+
+  vector<string> bufferRegions;
+  for (auto &n : allBufferRegions)
+    if (n != outputRegion)
       bufferRegions.push_back(n);
 
   if (!fs::exists(activePath)) {
@@ -1108,15 +1136,19 @@ int main(int argc, char **argv) {
   MemoryLayout layoutC = parse_layout(correct_raw);
   print_layout(layoutC, "correct");
 
+  string outputName;
   string outputRegionExclude;
   {
     JsonObj peek = parse_flat_json(read_file(spec_path));
     const JsonValue *v = json_find(peek, "output");
     if (v && v->isString) {
+      outputName = v->s;
+
       if (layoutC.regions.count(v->s))
         outputRegionExclude = v->s;
       else
         outputRegionExclude = find_region_by_prefix(v->s, layoutC);
+
       if (!outputRegionExclude.empty())
         cout << "[note] excluding output region '" << outputRegionExclude
              << "' from positional input matching (JSON said '" << v->s
@@ -1127,7 +1159,8 @@ int main(int argc, char **argv) {
   cerr << "\n[DEBUG] BEFORE build_arg_map\n";
 
   ArgMap argMap =
-      build_arg_map(fn, active_path, layoutC, correct_raw, outputRegionExclude);
+      build_arg_map(fn, active_path, layoutC, correct_raw, outputName,
+                    outputRegionExclude);
 
   cerr << "[DEBUG] AFTER build_arg_map\n";
 
