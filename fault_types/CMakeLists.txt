@@ -27,6 +27,7 @@ endif()
 add_executable(loop_fn_Fault loop_fn_Fault.cpp)
 add_executable(binOp_load_store_Fault binOp_load_store_Fault.cpp)
 add_executable(fuse_back fuse_back.cpp)
+add_executable(backward_slice backward_slice.cpp)
 add_executable(smt_parser ../smt_queries/smt_parser_main.cpp)
 
 # Map needed LLVM components to library names
@@ -42,6 +43,10 @@ llvm_map_components_to_libnames(LLVM_LIBS
 # Link LLVM libraries
 # --------------------
 target_link_libraries(loop_fn_Fault
+  PRIVATE
+  ${LLVM_LIBS}
+)
+target_link_libraries(backward_slice
   PRIVATE
   ${LLVM_LIBS}
 )
