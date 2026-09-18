@@ -157,8 +157,9 @@ static MemoryLayout parse_layout(const string &src) {
     string start = (*it)[2].str();
     string end = (*it)[3].str();
 
-    cerr << "[DEBUG parse_layout] " << name << " start='" << start << "' end='"
-         << end << "'\n";
+    // cerr << "[DEBUG parse_layout] " << name << " start='" << start << "'
+    // end='"
+    //  << end << "'\n";
 
     MemRegion r;
     r.name = name;
@@ -294,8 +295,8 @@ static bool trace_pinned_scalar(const string &src, const string &base,
   if (!regex_search(src, m, re))
     return false;
 
-  cerr << "[DEBUG trace_pinned_scalar] base='" << base << "' matched='"
-       << m[1].str() << "'\n";
+  // cerr << "[DEBUG trace_pinned_scalar] base='" << base << "' matched='"
+  //  << m[1].str() << "'\n";
 
   try {
     out = stoll(m[1].str());
@@ -496,44 +497,31 @@ static bool is_internal_region(const string &name, const string &fn,
   long long dummy;
   return trace_pinned_scalar(src, name, false, dummy);
 }
-
 static ArgMap build_arg_map(const string &fn, const string &activePath,
                             const MemoryLayout &L, const string &src,
-                            const string &outputName,
-                            const string &outputRegionExclude) {
-  // Pointer arguments are matched in declaration order. For m_vec_mul_add:
-  //   arg 1: in  -> sk
-  //   arg 3: acc -> Pv (output)
-  // The Array comments contain physical region names, not C argument names.
+                            const string &outputName) {
   ArgMap M;
+  const string anchorRegion = "__mbc_ret_anchor_" + fn;
+  const bool hasAnchor = L.regions.count(anchorRegion) > 0;
 
-  vector<string> allBufferRegions;
+  // Buffer regions in ARGUMENT order: the harness allocas its buffers in the
+  // order it passes them to the call, so ascending start address == position.
+  vector<string> bufferRegions;
   for (auto &n : L.order)
     if (!is_internal_region(n, fn, src))
-      allBufferRegions.push_back(n);
-
-  // If the output name is not present in the trace layout (e.g. acc versus
-  // the physical region Pv), use pointer-argument order. The output is the
-  // last pointer argument for m_vec_mul_add, hence the last region.
-  string outputRegion = outputRegionExclude;
-  if (outputRegion.empty() && !allBufferRegions.empty()) {
-    outputRegion = allBufferRegions.back();
-    cout << "[note] output '" << outputName
-         << "' is not named in the trace layout; treating last non-internal "
-            "region '"
-         << outputRegion << "' as the output by argument order\n";
-  }
-
-  // Record both directions so load_function_spec() can resolve "acc" -> Pv.
-  if (!outputRegion.empty()) {
-    M.paramToRegion[outputName] = outputRegion;
-    M.regionToParam[outputRegion] = outputName;
-  }
-
-  vector<string> bufferRegions;
-  for (auto &n : allBufferRegions)
-    if (n != outputRegion)
       bufferRegions.push_back(n);
+  std::sort(bufferRegions.begin(), bufferRegions.end(),
+            [&](const string &a, const string &b) {
+              return L.regions.at(a).start < L.regions.at(b).start;
+            });
+
+  auto mapOutputToAnchor = [&] {
+    M.paramToRegion[outputName] = anchorRegion;
+    M.regionToParam[anchorRegion] = outputName;
+    cout << "[note] output '" << outputName
+         << "' is the scalar return value (captured in " << anchorRegion
+         << ")\n";
+  };
 
   if (!fs::exists(activePath)) {
     cout << "[note] no " << activePath
@@ -542,53 +530,76 @@ static ArgMap build_arg_map(const string &fn, const string &activePath,
       M.paramToRegion[n] = n;
       M.regionToParam[n] = n;
     }
+    if (!L.regions.count(outputName) && hasAnchor)
+      mapOutputToAnchor();
     return M;
   }
 
+  // Pointer params in declaration order (JSON order is preserved).
   JsonObj act = parse_flat_json(read_file(activePath));
-
   vector<pair<string, long long>> bufferParams;
   for (auto &kv : act) {
     if (kv.second.isString)
       throw runtime_error("active_lengths: '" + kv.first +
                           "' must be an integer");
+    const string scalarBase = "__mbc_arg_" + fn + "_" + kv.first;
     long long dummy;
-    bool isScalar = L.regions.count("__mbc_arg_" + fn + "_" + kv.first) ||
-                    trace_pinned_scalar(src, "__mbc_arg_" + fn + "_" + kv.first,
-                                        false, dummy);
-    if (isScalar) {
-      M.paramToRegion[kv.first] = "__mbc_arg_" + fn + "_" + kv.first;
+    if (L.regions.count(scalarBase) ||
+        trace_pinned_scalar(src, scalarBase, false, dummy)) {
+      M.paramToRegion[kv.first] = scalarBase;
       continue;
     }
     bufferParams.push_back({kv.first, kv.second.i});
   }
 
-  if (bufferParams.size() != bufferRegions.size()) {
+  bool outputIsPointerParam = any_of(
+      bufferParams.begin(), bufferParams.end(),
+      [&](const pair<string, long long> &p) { return p.first == outputName; });
+
+  vector<string> matchRegions = bufferRegions;
+  if (outputIsPointerParam) {
+    // Output is one of the listed pointer args -- zip positionally below.
+  } else if (hasAnchor && bufferParams.size() == bufferRegions.size()) {
+    mapOutputToAnchor(); // e.g. lincomb's `c`
+  } else if (bufferParams.size() + 1 == bufferRegions.size()) {
+    // Legacy: output pointer omitted from active_lengths (m_vec_mul_add's
+    // acc); it is the last pointer argument.
+    string outReg = matchRegions.back();
+    matchRegions.pop_back();
+    M.paramToRegion[outputName] = outReg;
+    M.regionToParam[outReg] = outputName;
+    M.activeLen[outReg] = L.regions.at(outReg).size();
+    cout << "[note] output '" << outputName
+         << "' not listed in active_lengths; treating last pointer argument '"
+         << outReg << "' as the output\n";
+  }
+
+  if (bufferParams.size() != matchRegions.size()) {
     string ps, rs;
     for (auto &p : bufferParams)
       ps += " " + p.first;
-    for (auto &r : bufferRegions)
+    for (auto &r : matchRegions)
       rs += " " + r;
     throw runtime_error(
         "Cannot match parameters to regions positionally: " + activePath +
-        " has " + to_string(bufferParams.size()) + " buffer parameter(s) (" +
-        ps + " ) but the trace declares " + to_string(bufferRegions.size()) +
+        " has " + to_string(bufferParams.size()) + " pointer parameter(s) (" +
+        ps + " ) but the trace declares " + to_string(matchRegions.size()) +
         " buffer region(s) (" + rs + " )");
   }
 
   for (size_t i = 0; i < bufferParams.size(); i++) {
     const string &param = bufferParams[i].first;
-    const string &region = bufferRegions[i];
-    M.paramToRegion[param] = region;
-    M.regionToParam[region] = param;
+    const string &region = matchRegions[i];
     long long len = bufferParams[i].second;
     const MemRegion &r = L.regions.at(region);
     if (len <= 0 || len > r.size())
       throw runtime_error("Active length " + to_string(len) + " for '" + param +
                           "' does not fit region '" + region + "' (" +
                           to_string(r.size()) + " bytes)");
+    M.paramToRegion[param] = region;
+    M.regionToParam[region] = param;
     M.activeLen[region] = len;
-    cout << "[map] " << param << " -> " << region << " (" << len
+    cout << "[map] arg#" << i << " " << param << " -> " << region << " (" << len
          << " active bytes of " << r.size() << ")\n";
   }
   return M;
@@ -948,28 +959,21 @@ check_value(int value, const FunctionSpec &spec, const string &c1,
             slv.add(select(mm, addr) == vi);
           slv.add(vi == ctx.int_val((int)a.fillValue));
         } else {
-          string suffix;
-          if (isCorrectExecution && execTag == "C1")
-            suffix = "_1_";
-          else if (isCorrectExecution && execTag == "C2")
-            suffix = "_2_";
-          else if (!isCorrectExecution && execTag == "F1")
-            suffix = "_F1_";
-          else
-            suffix = "_F2_";
-
+          // C1/F1 share inputs; C2/F2 share inputs.
+          const bool trial1 = (execTag == "C1" || execTag == "F1");
+          const string suffix = trial1 ? "_1_" : "_2_";
           expr oi = ctx.int_const((a.name + suffix + to_string(i)).c_str());
           for (const expr &mm : mems)
             slv.add(select(mm, addr) == oi);
           slv.add(oi >= ctx.int_val(0));
           slv.add(oi < ctx.int_val((int)spec.fieldSize));
-
-          if (isCorrectExecution && execTag == "C1" && i == 0 &&
-              !haveSweepVar) {
-            sweepVar = oi;
-            haveSweepVar = true;
+          if (trial1 && i == 0) {
+            if (!haveSweepVar) {
+              sweepVar = oi;
+              haveSweepVar = true;
+            }
           } else {
-            slv.add(oi == ctx.int_val((int)a.fillValue));
+            slv.add(oi == ctx.int_val(i == 0 ? (int)a.fillValue : 0));
           }
         }
       }
@@ -1143,31 +1147,19 @@ int main(int argc, char **argv) {
     const JsonValue *v = json_find(peek, "output");
     if (v && v->isString) {
       outputName = v->s;
-
-      if (layoutC.regions.count(v->s))
-        outputRegionExclude = v->s;
-      else
-        outputRegionExclude = find_region_by_prefix(v->s, layoutC);
-
-      if (!outputRegionExclude.empty())
-        cout << "[note] excluding output region '" << outputRegionExclude
-             << "' from positional input matching (JSON said '" << v->s
-             << "')\n";
     }
   }
-
-  cerr << "\n[DEBUG] BEFORE build_arg_map\n";
+  // cerr << "\n[DEBUG] BEFORE build_arg_map\n";
 
   ArgMap argMap =
-      build_arg_map(fn, active_path, layoutC, correct_raw, outputName,
-                    outputRegionExclude);
+      build_arg_map(fn, active_path, layoutC, correct_raw, outputName);
 
-  cerr << "[DEBUG] AFTER build_arg_map\n";
+  // cerr << "[DEBUG] AFTER build_arg_map\n";
 
   FunctionSpec spec = load_function_spec(fn, spec_path, layoutC, correct_raw,
                                          argMap, variedOverride);
 
-  cerr << "[DEBUG] AFTER load_function_spec\n";
+  // cerr << "[DEBUG] AFTER load_function_spec\n";
   for (auto &a : spec.args)
     cout << "[arg] " << a.param << " (" << a.name << ") "
          << (a.role == ArgRole::FixedInput ? "fixed=" + to_string(a.fillValue)
@@ -1357,7 +1349,7 @@ int main(int argc, char **argv) {
     if (satValues.empty())
       continue;
 
-    string witness_path = fn_path + "smt_witness_" + tag + ".json";
+    string witness_path = fn_path + "ineffective_smt_witness_" + tag + ".json";
     ofstream wj(witness_path);
     wj << "{\n";
     wj << "  \"function\": \"" << fn << "\",\n";

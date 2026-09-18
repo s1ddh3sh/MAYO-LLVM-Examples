@@ -405,6 +405,39 @@ resolveOffset(Value *Ptr, const std::map<PHINode *, int64_t> &bind) {
   return {cur, total};
 }
 
+// Called when substitution gets stuck on Argument A with no existing
+// mapping: ON DEMAND, look up A's OWN function's callers (already computed
+// once, in g_callersOf) and populate a mapping for ALL its pointer
+// parameters -- exactly what the calls-scan does proactively when a call is
+// discovered going FORWARD, but there is no forward-discovery path for taint
+// that arrives at a parameter by climbing back UP through a store (e.g.
+// m_vec_mul_add's `acc[i] ^= ...` pattern moves taint from m_vec_mul_add's
+// own "acc" up to P1P1t_times_O's "acc" -- nobody ever "discovers" the call
+// FROM compute_M_and_VPV INTO P1P1t_times_O in that direction, since no
+// other function's code could ever literally reference P1P1t_times_O's own
+// Argument value; the only way to learn who calls it is to ask directly).
+// NOTE: context-insensitive, like the rest of this tool -- if the function
+// has multiple callers, only the FIRST discovered call site's mapping is
+// used; no attempt is made to split the analysis per calling context.
+static void ensureArgSubstFor(Function *Fn, std::map<Argument *, Value *> &argSubst) {
+  bool alreadyTried = true;
+  for (Argument &A : Fn->args())
+    if (!g_argSubstAttempted.count(&A)) { alreadyTried = false; break; }
+  if (alreadyTried) return;
+
+  auto it = g_callersOf.find(Fn);
+  if (it == g_callersOf.end() || it->second.empty()) {
+    for (Argument &A : Fn->args()) g_argSubstAttempted.insert(&A);
+    return;
+  }
+  CallBase *CB = it->second.front(); // first discovered call site
+  for (unsigned a2 = 0; a2 < CB->arg_size() && a2 < Fn->arg_size(); ++a2) {
+    if (CB->getArgOperand(a2)->getType()->isPointerTy())
+      argSubst[Fn->getArg(a2)] = CB->getArgOperand(a2);
+    g_argSubstAttempted.insert(Fn->getArg(a2));
+  }
+}
+
 // Resolve obj/off through zero or more layers of "this Argument corresponds
 // to that actual value at a specific call site" substitution. This is what's
 // needed for taint that ENTERS a callee through one parameter but is WRITTEN
@@ -422,6 +455,7 @@ substituteThroughArgs(Value *obj, int64_t off,
                      std::map<PHINode *, int64_t> &bind) {
   std::set<Value *> seen;
   while (auto *A = dyn_cast<Argument>(obj)) {
+    ensureArgSubstFor(A->getParent(), argSubst); // on-demand, see comment above
     auto it = argSubst.find(A);
     if (it == argSubst.end()) break;
     if (!seen.insert(obj).second) return {obj, std::nullopt}; // cycle guard
@@ -449,6 +483,7 @@ static Value *substituteObjOnly(Value *obj,
                                 std::map<PHINode *, int64_t> &bind) {
   std::set<Value *> seen;
   while (auto *A = dyn_cast<Argument>(obj)) {
+    ensureArgSubstFor(A->getParent(), argSubst); // on-demand, see comment above
     auto it = argSubst.find(A);
     if (it == argSubst.end()) break;
     if (!seen.insert(obj).second) break;
@@ -600,6 +635,7 @@ int main(int argc, char **argv) {
           if (Function *C = CB->getCalledFunction())
             if (reach.count(C))
               callersOf[C].push_back(CB);
+  g_callersOf = callersOf; // make available to ensureArgSubstFor
 
   std::vector<Finding> findings;
   std::set<std::string> unknownCallees;

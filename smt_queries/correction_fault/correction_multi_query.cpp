@@ -1094,7 +1094,7 @@ int main(int argc, char **argv) {
     }
     anySat = true;
 
-    string witness_path = fn_path + "correction_witness_" + tag + ".json";
+    string witness_path = fn_path + "correction_smt_witness_" + tag + ".json";
     ofstream wj(witness_path);
     wj << "{\n";
     wj << "  \"function\": \"" << fn << "\",\n";
