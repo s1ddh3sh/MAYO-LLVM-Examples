@@ -3,7 +3,7 @@
 set -euo pipefail
 
 BASE_LL="../../mayo_IR/mayo1.ll"
-RESULTS_DIR="../results"
+RESULTS_DIR="../../test_mayo"
 FUSEBACK="./fuse_back"
 
 mkdir -p build && cd build
