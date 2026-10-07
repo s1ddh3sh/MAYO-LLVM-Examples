@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Instructions.h"
@@ -480,20 +481,25 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
            << "Extra/missing args will fall back to zero.\n";
   }
 
-  int outputArgPos = -1;
+  std::vector<std::string> outputNames;
   if (jsonHas(testcase, "output")) {
     const JsonValue &outVal = jsonGet(testcase, "output");
-    if (outVal.isString) {
-      int pos = 0;
-      for (auto &kv : testcase) {
-        if (kv.first == "output")
-          continue;
-        if (kv.first == outVal.strVal) {
-          outputArgPos = pos;
-          break;
-        }
-        pos++;
-      }
+    if (outVal.isString)
+      outputNames.push_back(outVal.strVal);
+    else if (outVal.isArray)
+      outputNames = outVal.arrVal;
+  }
+  std::vector<bool> isOutputPos(TargetF->arg_size(), false);
+  {
+    unsigned pos = 0;
+    for (auto &kv : testcase) {
+      if (kv.first == "output")
+        continue;
+      if (pos < isOutputPos.size() &&
+          std::find(outputNames.begin(), outputNames.end(), kv.first) !=
+              outputNames.end())
+        isOutputPos[pos] = true;
+      pos++;
     }
   }
 
@@ -512,7 +518,7 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
     bool haveJsonVal =
         i < positionalVals.size() && !positionalVals[i]->isString;
     uint64_t jsonVal = haveJsonVal ? positionalVals[i]->asUInt64() : 0;
-    bool isOutputArg = ((int)i == outputArgPos);
+    bool isOutputArg = isOutputPos[i];
     bool doStore = haveJsonVal && !isOutputArg;
 
     if (argTy->isPointerTy()) {
@@ -1340,8 +1346,8 @@ int main(int argc, char **argv) {
   std::string bmcCmdCorrect = "../llvmbmc " + filename + funcName + ".ll" +
                               " --dump-solver-query "
                               "-f main --var-suffix correct ";
-  run_command(bmcCmdCorrect);
-  run_command("cp /tmp/test.smt2 " + filename + funcName + ".smt2");
+  // run_command(bmcCmdCorrect);
+  // run_command("cp /tmp/test.smt2 " + filename + funcName + ".smt2");
 
   // auto mod = parseIRFile("original.ll", err, ctx);
   // outs() << *funcModule;
@@ -1406,8 +1412,8 @@ int main(int argc, char **argv) {
                                " --dump-solver-query "
 
                                "-f main --var-suffix faulty ";
-    run_command(bmcCmdFaulty);
-    run_command("cp /tmp/test.smt2 " + smt2File);
+    // run_command(bmcCmdFaulty);
+    // run_command("cp /tmp/test.smt2 " + smt2File);
   }
 
   return 0;

@@ -14,6 +14,8 @@ struct JsonValue {
   // long long intVal = 0;
   uint64_t uintVal = 0;
   bool negative = false; // true if the literal had a leading '-'
+  bool isArray = false;  // array of strings, e.g. "output":["sm","m"]
+  std::vector<std::string> arrVal;
 
   std::string asString() const {
     return isString ? strVal : std::to_string(uintVal);
@@ -99,7 +101,24 @@ inline JsonObject parseJsonLine(const std::string &line) {
     skipWs(line, i);
 
     JsonValue val;
-    if (i < line.size() && line[i] == '"') {
+    if (i < line.size() && line[i] == '[') {
+      val.isArray = true;
+      i++;
+      while (true) {
+        skipWs(line, i);
+        if (i < line.size() && line[i] == ']') {
+          i++;
+          break;
+        }
+        if (i >= line.size() || line[i] != '"')
+          throw std::runtime_error("Expected string in array for key '" + key +
+                                   "' in: " + line);
+        val.arrVal.push_back(parseJsonString(line, i));
+        skipWs(line, i);
+        if (i < line.size() && line[i] == ',')
+          i++;
+      }
+    } else if (i < line.size() && line[i] == '"') {
       val.isString = true;
       val.strVal = parseJsonString(line, i);
     } else {
