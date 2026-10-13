@@ -2,6 +2,11 @@
 
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
+#include <iterator>
+#include <regex>
+#include <set>
+#include <sstream>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -178,4 +183,43 @@ inline std::vector<JsonObject> readJsonLines(const std::string &path) {
     result.push_back(parseJsonLine(line));
   }
   return result;
+}
+// The function's entry in the simulation's mayo.json
+// ({"<fn>": {"secret-buf": .., "fixed-scalars": "a,b", "eph_secret": ..}}).
+// Path: $MAYO_JSON, else ../../../test_qemu/mayo.json (relative to
+// fault_types/build, where run_faults.sh runs the generators).
+struct MayoFuncConfig {
+  bool found = false;
+  std::string secretBuf;
+  std::set<std::string> fixedScalars;
+};
+
+inline MayoFuncConfig loadMayoFuncConfig(const std::string &fn) {
+  MayoFuncConfig cfg;
+  const char *env = std::getenv("MAYO_JSON");
+  std::string path = env ? env : "../../../test_qemu/mayo.json";
+  std::ifstream in(path);
+  if (!in)
+    return cfg;
+  std::string text((std::istreambuf_iterator<char>(in)),
+                   std::istreambuf_iterator<char>());
+  // Entries are flat objects, so the first '}' after the key closes it.
+  std::smatch m;
+  std::regex entryRe("\"" + std::regex_replace(fn, std::regex(R"([.^$|()\[\]{}*+?\\])"), R"(\$&)") +
+                     "\"\\s*:\\s*\\{([^}]*)\\}");
+  if (!std::regex_search(text, m, entryRe))
+    return cfg;
+  cfg.found = true;
+  std::string body = m[1].str();
+  auto field = [&](const std::string &key) {
+    std::smatch f;
+    std::regex re("\"" + key + "\"\\s*:\\s*\"([^\"]*)\"");
+    return std::regex_search(body, f, re) ? f[1].str() : std::string();
+  };
+  cfg.secretBuf = field("secret-buf");
+  std::stringstream ss(field("fixed-scalars"));
+  for (std::string s; std::getline(ss, s, ',');)
+    if (!s.empty())
+      cfg.fixedScalars.insert(s);
+  return cfg;
 }

@@ -1,4 +1,3 @@
-#include <algorithm>
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
@@ -8,6 +7,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
+#include <algorithm>
 
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
@@ -52,6 +52,7 @@
 #include <vector>
 
 #include "json_parser.h"
+#include "bmc_variant.h"
 
 using namespace llvm;
 static constexpr unsigned kMaxUnrollTripCount = 2000;
@@ -1695,36 +1696,52 @@ int main(int argc, char **argv) {
     errs() << "Invalid mode. Use 0 or 1\n";
     return 1;
   }
-  std::string bmcCmdCorrect = "../llvmbmc " + original +
-                              " --dump-solver-query "
-                              "-f main --var-suffix correct ";
-  // run_command(bmcCmdCorrect);
+  std::string bmcCmdCorrect =
+      "../llvmbmc " + bmcInputFor(original, funcName) +
+      " -f main -u 1 -b --memory-granularity 8 -n --fold-readonly-globals "
+      "--rewrite-mem-loops --smt-only " +
+      "--var-suffix correct "; 
+  //                     ./llvmbmc -f main -u 1 -b --memory-granularity 8 -n \
+  // --fold-readonly-globals --rewrite-mem-loops --smt-only \
+  // -o /var/tmp/mayo_out/decode/ \
+  // ../mayo_examples/test_mayo/decode/decode.ll
   std::string targetSmt2 = original;
   size_t dotPos = targetSmt2.find_last_of('.');
   if (dotPos != std::string::npos) {
     targetSmt2.replace(dotPos, std::string::npos, ".smt2");
   }
-  // run_command("cp /tmp/test.smt2 " + targetSmt2);
+  runBmcToSmt2(bmcCmdCorrect, targetSmt2, funcName + " correct trace");
   if (mode == LOOP_SKIP) {
-    std::string bmcCmdFaulty = "../llvmbmc " + faultyFile + "_loopskip.ll" +
-                               " --dump-solver-query "
-
-                               "-f main --var-suffix faulty ";
-    // run_command(bmcCmdFaulty);
-    // run_command("cp /tmp/test.smt2 ../loopFault.smt2");
+    std::string bmcCmdFaulty =
+        "../llvmbmc " + bmcInputFor(faultyFile, funcName) +
+        " -f main -u 1 -b --memory-granularity 8 -n --fold-readonly-globals "
+        "--rewrite-mem-loops --smt-only " +
+        "--var-suffix faulty ";
+    runBmcToSmt2(bmcCmdFaulty, "../loopFault.smt2",
+                 funcName + " loop skip");
   } else {
+    if (outFile.empty()) {
+      // the faulty module failed verification above; nothing to translate
+      std::cerr << "BMC_FAILED: " << funcName << " fnSkip line " << skipLine
+                << " -> (invalid faulty IR, no .ll written)\n";
+      bmcFailures().push_back(funcName + " fnSkip line " +
+                              std::to_string(skipLine) + " -> invalid IR");
+      return bmcExitCode();
+    }
     targetSmt2 = outFile;
     size_t dotPos = targetSmt2.find_last_of('.');
     if (dotPos != std::string::npos) {
       targetSmt2.replace(dotPos, std::string::npos, ".smt2");
     }
-    std::string bmcCmdFaulty = "../llvmbmc " + outFile +
-                               " --dump-solver-query "
-
-                               "-f main --var-suffix faulty ";
-    // run_command(bmcCmdFaulty);
-    // run_command("cp /tmp/test.smt2 " + targetSmt2);
+    std::string bmcCmdFaulty =
+        "../llvmbmc " + bmcInputFor(outFile, funcName) +
+        " -f main -u 1 -b --memory-granularity 8 -n --fold-readonly-globals "
+        "--rewrite-mem-loops --smt-only " +
+        "--var-suffix faulty ";
+    runBmcToSmt2(bmcCmdFaulty, targetSmt2,
+                 funcName + " fnSkip " + skippedCalleeName + " line " +
+                     std::to_string(skipLine));
   }
 
-  return 0;
+  return bmcExitCode();
 }

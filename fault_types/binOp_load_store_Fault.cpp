@@ -1,4 +1,3 @@
-#include <algorithm>
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Instructions.h"
@@ -12,6 +11,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
+#include <algorithm>
 
 #include "llvm/Transforms/IPO/GlobalDCE.h"
 #include "llvm/Transforms/IPO/GlobalOpt.h"
@@ -38,6 +38,7 @@
 #include <iostream>
 
 #include "json_parser.h"
+#include "bmc_variant.h"
 #include <memory>
 
 using namespace llvm;
@@ -647,8 +648,9 @@ void createDynamicDriverFunction(Module &OriginalM, Module &ExtractedM,
         anchor = new GlobalVariable(
             ExtractedM, argTy, /*isConstant=*/false,
             GlobalValue::ExternalLinkage,
-            ConstantInt::get(argTy, initVal), // baked as the GLOBAL's initializer
-                        // (lands in .data), not a runtime store
+            ConstantInt::get(argTy,
+                             initVal), // baked as the GLOBAL's initializer
+                                       // (lands in .data), not a runtime store
             anchorName);
       }
       Value *loaded =
@@ -1328,7 +1330,8 @@ int main(int argc, char **argv) {
            << "\n";
     return 1;
   }
-  Instruction *postPipelineInst = findInstByLocator(*postPipelineF, sourceLoc, isBinOp, isLoadOrStore);
+  Instruction *postPipelineInst =
+      findInstByLocator(*postPipelineF, sourceLoc, isBinOp, isLoadOrStore);
   if (!postPipelineInst) {
     errs() << "Could not re-locate target instruction after unroll/optimize "
               "pipeline (source line "
@@ -1343,11 +1346,13 @@ int main(int argc, char **argv) {
   // std::string filename = "../results/" + funcName + ".ll";
   dump_module(*funcModule, filename + funcName + ".ll");
   outs() << "Wrote" << filename << funcName << "\n";
-  std::string bmcCmdCorrect = "../llvmbmc " + filename + funcName + ".ll" +
-                              " --dump-solver-query "
-                              "-f main --var-suffix correct ";
-  // run_command(bmcCmdCorrect);
-  // run_command("cp /tmp/test.smt2 " + filename + funcName + ".smt2");
+  std::string bmcCmdCorrect =
+      "../llvmbmc " + bmcInputFor(filename + funcName + ".ll", funcName) +
+      " -f main -u 1 -b --memory-granularity 8 -n --fold-readonly-globals "
+      "--rewrite-mem-loops --smt-only " +
+      "--var-suffix correct ";
+  runBmcToSmt2(bmcCmdCorrect, filename + funcName + ".smt2",
+               funcName + " correct trace");
 
   // auto mod = parseIRFile("original.ll", err, ctx);
   // outs() << *funcModule;
@@ -1408,13 +1413,14 @@ int main(int argc, char **argv) {
 
     dump_module(*cloned, llFile);
     outs() << "Wrote " << llFile << "\n";
-    std::string bmcCmdFaulty = "../llvmbmc " + llFile +
-                               " --dump-solver-query "
-
-                               "-f main --var-suffix faulty ";
-    // run_command(bmcCmdFaulty);
-    // run_command("cp /tmp/test.smt2 " + smt2File);
+    std::string bmcCmdFaulty =
+        "../llvmbmc " + bmcInputFor(llFile, funcName) +
+        " -f main -u 1 -b --memory-granularity 8 -n --fold-readonly-globals "
+        "--rewrite-mem-loops --smt-only " +
+        "--var-suffix faulty ";
+    runBmcToSmt2(bmcCmdFaulty, smt2File,
+                 funcName + " line " + argv[3] + " " + fe.name);
   }
 
-  return 0;
+  return bmcExitCode();
 }

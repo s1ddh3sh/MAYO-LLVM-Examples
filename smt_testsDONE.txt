@@ -1,1 +1,169 @@
-mat_add, lincomb (doubt), m_vec_add
+{
+    "add_f":{ ✅
+        "secret-buf": "b"
+    },
+    "compute_A":{ pending
+        "secret-buf": "VtL"
+    },
+    "decode":{✅
+        "secret-buf":"m",
+        "fixed-scalars":"mdeclen"
+    },
+    "EF":{ bmc error
+        "secret-buf":"A_pre",
+        "fixed-scalars":"nrows,ncols"
+    },
+    "inverse_f":{✅
+        "secret-buf":"a"
+    },
+    "lincomb":{✅
+        "secret-buf":"b",
+        "fixed-scalars":"m,n"
+    },
+    "m_vec_add":{✅
+        "secret-buf":"in",
+        "fixed-scalars":"m_vec_limbs"
+    },
+    "m_vec_mul_add":{✅
+        "secret-buf":"in",
+        "fixed-scalars":"m_vec_limbs"
+    },
+    "mat_add":{✅
+        "secret-buf":"Ox",
+        "eph_secret":"Vdec",
+        "fixed-scalars":"m,n"
+    },
+    "mat_mul":{✅
+        "secret-buf":"O",
+        "fixed-scalars":"colrow_ab,row_a,col_b"
+    },
+    "mul_add_m_upper_triangular_mat_x_mat":{
+        "secret-buf":"mat",
+        "fixed-scalars":"m_vec_limbs,bs_mat_rows,bs_mat_cols,mat_cols,triangular"
+    },
+    "mul_add_m_upper_triangular_mat_x_mat_trans":{
+        "secret-buf":"mat",
+        "fixed-scalars":"m_vec_limbs,bs_mat_rows,bs_mat_cols,mat_rows,triangular"
+    },
+    "mul_add_mat_trans_x_m_mat":{
+        "secret-buf":"mat",
+        "fixed-scalars":"m_vec_limbs,bs_mat_cols,mat_rows,mat_cols"
+    },
+    "mul_add_mat_x_m_mat":{
+        "secret-buf":"mat",
+        "fixed-scalars":"m_vec_limbs,bs_mat_cols,mat_rows,mat_cols"
+    },
+    "mul_f":{✅
+        "secret-buf":"a"
+    },
+    "P1_times_O":{
+        "secret-buf":"O"
+    },
+    "P1_times_Vt":{
+        "secret-buf":"V"
+    },
+    "pqmayo_MAYO_1_ref_mayo_keypair":{
+        "secret-buf":"sk"
+    },
+    "pqmayo_MAYO_1_ref_mayo_keypair_compact":{ bmc error
+        "secret-buf":"csk"
+    },
+    "shake256":{ bmc error
+        "secret-buf":"input",
+        "fixed-scalars":"outlen,inlen"
+    },
+    "sub_f":{✅
+        "secret-buf":"b"
+    },
+    "compute_rhs":{ bmc error
+        "secret-buf":"vPv"
+    },
+    "compute_P3":{
+        "secret-buf":"O"
+    },
+    "compute_M_and_VPV":{
+        "secret-buf":"L",
+        "eph_secret":"Vdec"
+    },
+    "ef_pack_m_vec":{ bmc error
+        "secret-buf":"in",
+        "fixed-scalars":"ncols"
+    },
+    "m_calculate_PS_SPS":{
+        "secret-buf":"s"
+    },
+    "mul_table":{✅
+        "secret-buf":"b"
+    },
+    "P1P1t_times_O":{
+        "secret-buf":"O"
+    },
+    "pqmayo_MAYO_1_ref_mayo_expand_pk":{
+        "secret-buf":"cpk"
+    },
+    "pqmayo_MAYO_1_ref_mayo_expand_sk":{ bmc error
+        "secret-buf":"csk"
+    },
+    "pqmayo_MAYO_1_ref_mayo_sign":{
+        "secret-buf":"csk",
+        "fixed-scalars":"smlen,mlen"
+    },
+    "pqmayo_MAYO_1_ref_mayo_sign_signature":{
+        "secret-buf":"csk",
+        "fixed-scalars":"siglen,mlen"
+    },
+    "pqmayo_MAYO_1_ref_sample_solution":{ bmc error
+        "secret-buf":"A",
+        "fixed-scalars":"k,o,m,A_cols"
+    },
+    "vec_mul_add_u64":{ bmc error
+        "secret-buf":"in",
+        "fixed-scalars":"legs,a"
+    }
+}
+
+
+bmc errors:
+Failures (entry | reason | trace or command):
+  - shake256 line 11 (CallInst -> shake256_squeezeblocks) | llvmbmc failed | shake256 fnSkip shake256_squeezeblocks line 11 -> ../../test_mayo/shake256/loopOrFuncSkip/shake256_fnSkip_shake256_squeezeblocks_line11.smt2
+  - shake256 line 4 (CallInst -> shake256_squeezeblocks) | llvmbmc failed | shake256 fnSkip shake256_squeezeblocks line 4 -> ../../test_mayo/shake256/loopOrFuncSkip/shake256_fnSkip_shake256_squeezeblocks_line4.smt2
+
+  - EF line 105 (BinOp) | llvmbmc failed | EF line 105 undef -> ../../test_mayo/EF/binOpFault/EF_line105_undef.smt2
+  - EF line 108 (BinOp) | llvmbmc failed | EF line 108 undef -> ../../test_mayo/EF/binOpFault/EF_line108_undef.smt2
+  - EF line 109 (BinOp) | llvmbmc failed | EF line 109 undef -> ../../test_mayo/EF/binOpFault/EF_line109_undef.smt2
+  - EF line 67 (BinOp) | llvmbmc failed | EF correct trace -> ../../test_mayo/EF/EF.smt2
+  - EF line 72 (BinOp) | llvmbmc failed | EF line 72 undef -> ../../test_mayo/EF/binOpFault/EF_line72_undef.smt2
+  - EF line 75 (BinOp) | llvmbmc failed | EF line 75 undef -> ../../test_mayo/EF/binOpFault/EF_line75_undef.smt2
+
+  - ef_pack_m_vec line 10 (BinOp) | llvmbmc failed | ef_pack_m_vec line 10 undef -> ../../test_mayo/ef_pack_m_vec/binOpFault/ef_pack_m_vec_line10_undef.smt2
+  - ef_pack_m_vec line 11 (BinOp) | llvmbmc failed | ef_pack_m_vec line 11 undef -> ../../test_mayo/ef_pack_m_vec/binOpFault/ef_pack_m_vec_line11_undef.smt2
+
+  - compute_rhs line 62 (LoadInst) | llvmbmc failed | compute_rhs correct trace -> ../../test_mayo/compute_rhs/compute_rhs.smt2
+  - compute_rhs line 74 (StoreInst) | llvmbmc failed | compute_rhs line 74 mem -> ../../test_mayo/compute_rhs/loadStoreSkip/compute_rhs_line74_mem.smt2
+  - compute_rhs line 95 (BinOp) | llvmbmc failed | compute_rhs line 95 undef -> ../../test_mayo/compute_rhs/binOpFault/compute_rhs_line95_undef.smt2
+  - compute_rhs line 97 (LoadInst) | llvmbmc failed | compute_rhs line 97 mem -> ../../test_mayo/compute_rhs/loadStoreSkip/compute_rhs_line97_mem.smt2
+  - compute_rhs line 98 (BinOp) | llvmbmc failed | compute_rhs line 98 undef -> ../../test_mayo/compute_rhs/binOpFault/compute_rhs_line98_undef.smt2
+
+  - vec_mul_add_u64 line 12 (BinOp) | llvmbmc failed | vec_mul_add_u64 line 12 undef -> ../../test_mayo/vec_mul_add_u64/binOpFault/vec_mul_add_u64_line12_undef.smt2
+  - vec_mul_add_u64 line 14 (BinOp) | llvmbmc failed | vec_mul_add_u64 line 14 zero -> ../../test_mayo/vec_mul_add_u64/binOpFault/vec_mul_add_u64_line14_zero.smt2
+  - vec_mul_add_u64 line 18 (BinOp) | llvmbmc failed | vec_mul_add_u64 line 18 undef -> ../../test_mayo/vec_mul_add_u64/binOpFault/vec_mul_add_u64_line18_undef.smt2
+  - vec_mul_add_u64 line 19 (BinOp) | llvmbmc failed | vec_mul_add_u64 line 19 undef -> ../../test_mayo/vec_mul_add_u64/binOpFault/vec_mul_add_u64_line19_undef.smt2
+  - vec_mul_add_u64 line 27 (BinOp) | llvmbmc failed | vec_mul_add_u64 line 27 undef -> ../../test_mayo/vec_mul_add_u64/binOpFault/vec_mul_add_u64_line27_undef.smt2
+  - vec_mul_add_u64 line 28 (BinOp) | llvmbmc failed | vec_mul_add_u64 line 28 undef -> ../../test_mayo/vec_mul_add_u64/binOpFault/vec_mul_add_u64_line28_undef.smt2
+  - vec_mul_add_u64 line 36 (BinOp) | llvmbmc failed | vec_mul_add_u64 line 36 undef -> ../../test_mayo/vec_mul_add_u64/binOpFault/vec_mul_add_u64_line36_undef.smt2
+  - vec_mul_add_u64 line 37 (BinOp) | llvmbmc failed | vec_mul_add_u64 line 37 undef -> ../../test_mayo/vec_mul_add_u64/binOpFault/vec_mul_add_u64_line37_undef.smt2
+  - vec_mul_add_u64 line 40 (BinOp) | llvmbmc failed | vec_mul_add_u64 line 40 undef -> ../../test_mayo/vec_mul_add_u64/binOpFault/vec_mul_add_u64_line40_undef.smt2
+
+  - pqmayo_MAYO_1_ref_mayo_expand_sk line 4 (CallInst -> decode) | llvmbmc failed | pqmayo_MAYO_1_ref_mayo_expand_sk correct trace -> ../../test_mayo/pqmayo_MAYO_1_ref_mayo_expand_sk/pqmayo_MAYO_1_ref_mayo_expand_sk.smt2
+  - pqmayo_MAYO_1_ref_mayo_expand_sk line 4 (CallInst -> decode) | llvmbmc failed | pqmayo_MAYO_1_ref_mayo_expand_sk fnSkip decode line 4 -> ../../test_mayo/pqmayo_MAYO_1_ref_mayo_expand_sk/loopOrFuncSkip/pqmayo_MAYO_1_ref_mayo_expand_sk_fnSkip_decode_line4.smt2
+  - pqmayo_MAYO_1_ref_mayo_expand_sk line 5 (CallInst -> expand_P1_P2) | llvmbmc failed | pqmayo_MAYO_1_ref_mayo_expand_sk fnSkip expand_P1_P2 line 5 -> ../../test_mayo/pqmayo_MAYO_1_ref_mayo_expand_sk/loopOrFuncSkip/pqmayo_MAYO_1_ref_mayo_expand_sk_fnSkip_expand_P1_P2_line5.smt2
+  - pqmayo_MAYO_1_ref_mayo_expand_sk line 7 (CallInst -> P1P1t_times_O) | llvmbmc failed | pqmayo_MAYO_1_ref_mayo_expand_sk fnSkip P1P1t_times_O line 7-> ../../test_mayo/pqmayo_MAYO_1_ref_mayo_expand_sk/loopOrFuncSkip/pqmayo_MAYO_1_ref_mayo_expand_sk_fnSkip_P1P1t_times_O_line7.smt2
+  - pqmayo_MAYO_1_ref_mayo_expand_sk line 8 (CallInst -> mayo_secure_clear) | llvmbmc failed | pqmayo_MAYO_1_ref_mayo_expand_sk fnSkip mayo_secure_clear line 8 -> ../../test_mayo/pqmayo_MAYO_1_ref_mayo_expand_sk/loopOrFuncSkip/pqmayo_MAYO_1_ref_mayo_expand_sk_fnSkip_mayo_secure_clear_line8.smt2
+
+  - pqmayo_MAYO_1_ref_sample_solution line 106 (BinOp) | llvmbmc failed | pqmayo_MAYO_1_ref_sample_solution line 106 zero -> ../../test_mayo/pqmayo_MAYO_1_ref_sample_solution/binOpFault/pqmayo_MAYO_1_ref_sample_solution_line106_zero.smt2
+  - pqmayo_MAYO_1_ref_sample_solution line 110 (BinOp) | llvmbmc failed | pqmayo_MAYO_1_ref_sample_solution line 110 undef -> ../../test_mayo/pqmayo_MAYO_1_ref_sample_solution/binOpFault/pqmayo_MAYO_1_ref_sample_solution_line110_undef.smt2
+  - pqmayo_MAYO_1_ref_sample_solution line 133 (LoadInst) | llvmbmc failed | pqmayo_MAYO_1_ref_sample_solution line 133 mem -> ../../test_mayo/pqmayo_MAYO_1_ref_sample_solution/loadStoreSkip/pqmayo_MAYO_1_ref_sample_solution_line133_mem.smt2
+  - pqmayo_MAYO_1_ref_sample_solution line 185 (BinOp) | llvmbmc failed | pqmayo_MAYO_1_ref_sample_solution correct trace -> ../../test_mayo/pqmayo_MAYO_1_ref_sample_solution/pqmayo_MAYO_1_ref_sample_solution.smt2
+  - pqmayo_MAYO_1_ref_sample_solution line 242 (LoadInst) | llvmbmc failed | pqmayo_MAYO_1_ref_sample_solution correct trace -> ../../test_mayo/pqmayo_MAYO_1_ref_sample_solution/pqmayo_MAYO_1_ref_sample_solution.smt2
+  - pqmayo_MAYO_1_ref_sample_solution line 246 (StoreInst) | llvmbmc failed | pqmayo_MAYO_1_ref_sample_solution correct trace -> ../../test_mayo/pqmayo_MAYO_1_ref_sample_solution/pqmayo_MAYO_1_ref_sample_solution.smt2
+
