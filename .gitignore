@@ -35,3 +35,4 @@ __pycache__
 .CMake/a.out
 
 test_mayo
+bmc_failures*
