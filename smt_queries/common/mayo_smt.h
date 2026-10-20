@@ -37,6 +37,7 @@
 #include <map>
 #include <mutex>
 #include <regex>
+#include <sys/resource.h>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -125,6 +126,10 @@ template <class F> void parallel_for(size_t n, unsigned jobs, F f) {
       for (size_t k; (k = next++) < n;) {
         try {
           f(k);
+        } catch (const std::bad_alloc &) {
+          std::lock_guard<std::mutex> g(errMu);
+          if (err.empty())
+            err = "out of memory -- raise --mem-limit or lower --jobs";
         } catch (const z3::exception &e) {
           std::lock_guard<std::mutex> g(errMu);
           if (err.empty())
@@ -142,28 +147,40 @@ template <class F> void parallel_for(size_t n, unsigned jobs, F f) {
     throw runtime_error(err);
 }
 
+// --mem-limit, once parsed (0 = none): the budget mem_safe_jobs plans with.
+inline size_t &g_memLimitMb() {
+  static size_t mb = 0;
+  return mb;
+}
+
+inline size_t mem_available_mb() {
+  std::ifstream mi("/proc/meminfo");
+  string key, unit;
+  size_t kb = 0;
+  while (mi >> key >> kb >> unit)
+    if (key == "MemAvailable:")
+      return kb / 1024;
+  return 0;
+}
+
 // Caps `want` parallel solver instances so that their estimated footprint
-// stays within 60% of MemAvailable. Measured on mat_mul: a Z3 context holding
-// trace copies takes ~40x the SMT text size; 60x is used for headroom.
+// stays within 80% of the memory budget (--mem-limit, else MemAvailable).
+// Measured on mat_mul: a Z3 context holding trace copies takes ~40x the SMT
+// text size; 60x is used for headroom. Only an estimate -- the hard limit is
+// the RLIMIT_AS set in parse_options.
 inline unsigned mem_safe_jobs(unsigned want, size_t textBytesPerInstance,
                               const char *what) {
-  std::ifstream mi("/proc/meminfo");
-  string key;
-  size_t kb = 0, availKb = 0;
-  string unit;
-  while (mi >> key >> kb >> unit)
-    if (key == "MemAvailable:") {
-      availKb = kb;
-      break;
-    }
-  if (availKb == 0 || want <= 1)
+  size_t availMb = mem_available_mb();
+  if (g_memLimitMb() > 0)
+    availMb = std::min(availMb, g_memLimitMb());
+  if (availMb == 0 || want <= 1)
     return std::max(1u, want);
   double est = 60.0 * (double)textBytesPerInstance;
-  unsigned fit = (unsigned)std::max(1.0, 0.6 * availKb * 1024.0 / est);
+  unsigned fit = (unsigned)std::max(1.0, 0.8 * availMb * 1048576.0 / est);
   if (fit < want) {
     std::cout << "[i] " << what << ": limiting to " << fit
               << " parallel job(s) (~" << (size_t)(est / (1 << 20))
-              << " MB each, " << availKb / 1024 << " MB available)\n";
+              << " MB each, " << availMb << " MB budget)\n";
     return fit;
   }
   return want;
@@ -454,12 +471,44 @@ inline vector<const Region *> buffer_regions(const TraceLayout &L) {
   return out;
 }
 
+// The driver's argument buffers: the allocas of main() in the function's .ll,
+// in argument order. The trace also declares regions for buffers internal to
+// the function (inlined callees' locals "*.i", heap_<N> mallocs, ...), so
+// region names alone cannot tell them apart. Empty if the .ll is missing.
+inline vector<string> driver_allocas(const string &llPath) {
+  vector<string> out;
+  std::ifstream in(llPath);
+  if (!in)
+    return out;
+  static const std::regex mainDef(R"(^define\s.*@main\()");
+  static const std::regex allocaRe(R"(^\s*%([^\s=]+)\s*=\s*alloca\b)");
+  string line;
+  bool inMain = false;
+  while (std::getline(in, line)) {
+    if (!inMain) {
+      inMain = std::regex_search(line, mainDef);
+      continue;
+    }
+    if (!line.empty() && line[0] == '}')
+      break;
+    std::smatch m;
+    if (std::regex_search(line, m, allocaRe)) {
+      string n = m[1].str();
+      if (n.size() > 2 && n.front() == '"' && n.back() == '"')
+        n = n.substr(1, n.size() - 2);
+      out.push_back(n);
+    }
+  }
+  return out;
+}
+
 inline FuncConfig resolve_config(const string &fn, const string &mayoJsonPath,
                                  const string &witnessPath,
                                  const string &activePath,
                                  const TraceLayout &L,
                                  const string &secretOverride,
-                                 uint64_t secretPos, unsigned fieldMod) {
+                                 uint64_t secretPos, unsigned fieldMod,
+                                 const vector<string> &driverBufs = {}) {
   FuncConfig cfg;
   cfg.fn = fn;
   cfg.secretPos = secretPos;
@@ -502,7 +551,21 @@ inline FuncConfig resolve_config(const string &fn, const string &mayoJsonPath,
   for (auto &kv : layout->obj)
     if (kv.second.str("type") != "scalar")
       ptrParams.push_back({kv.first, &kv.second});
-  vector<const Region *> bufs = buffer_regions(L);
+  vector<const Region *> bufs;
+  if (!driverBufs.empty()) {
+    for (auto &n : driverBufs) {
+      const Region *r = L.find(n);
+      if (!r)
+        throw runtime_error("driver buffer '" + n +
+                            "' (an alloca of main) is not a region of the "
+                            "trace");
+      bufs.push_back(r);
+    }
+  } else {
+    bufs = buffer_regions(L);
+    cfg.notes.push_back("no driver .ll found: guessing the argument buffers "
+                        "from the trace's region names");
+  }
   if (ptrParams.size() != bufs.size()) {
     string ps, rs;
     for (auto &p : ptrParams)
@@ -524,7 +587,11 @@ inline FuncConfig resolve_config(const string &fn, const string &mayoJsonPath,
                           " in the witness but region '" + r.name + "' is " +
                           to_string(r.size()) + " bytes in the trace");
     string role = spec.str("role");
-    bool asInput = role == "input" || spec.boolean("also_input");
+    // "<buf>_pre" names the pre-call contents of an in-place buffer (as in
+    // the simulation's records): <buf> is then an input as well.
+    bool inPlaceSecret = cfg.secretParam == param + "_pre";
+    bool asInput =
+        role == "input" || spec.boolean("also_input") || inPlaceSecret;
     if (asInput) {
       InputBuf in;
       in.param = param;
@@ -538,7 +605,11 @@ inline FuncConfig resolve_config(const string &fn, const string &mayoJsonPath,
                             to_string(r.size()));
         in.active = r.size();
       }
-      in.secret = param == cfg.secretParam;
+      in.secret = param == cfg.secretParam || inPlaceSecret;
+      if (inPlaceSecret && role == "output" && !spec.boolean("also_input"))
+        cfg.notes.push_back("secret '" + cfg.secretParam + "': '" + param +
+                            "' is treated as an in-place input+output buffer "
+                            "(the witness marks it output only)");
       in.eph = eph.count(param) > 0;
       cfg.inputs.push_back(in);
     }
@@ -679,73 +750,6 @@ inline string second_token(const string &sx) {
   return sx.substr(i, j - i);
 }
 
-// Rewrites the zero-fill lambda(s) of input regions inside one assert.
-inline bool rewrite_input_lambdas(string &a, const FuncConfig &cfg,
-                                  bool faulty, set<string> &initialized,
-                                  PreparedTrace &P) {
-  static const string open = "(lambda ((";
-  static const string zero = "(_ bv0 8)";
-  static const std::regex k64(R"(\(_ bv(\d+) 64\))");
-  bool changed = false;
-  size_t p = 0;
-  while ((p = a.find(open, p)) != string::npos) {
-    size_t lamEnd = match_paren(a, p);
-    size_t q = p + open.size();
-    size_t qe = q;
-    while (qe < a.size() && !isspace((unsigned char)a[qe]) && a[qe] != ')')
-      qe++;
-    string cell = a.substr(q, qe - q);
-    size_t ite = a.find("(ite ", qe);
-    p++;
-    if (lamEnd == string::npos || ite == string::npos || ite > lamEnd)
-      continue;
-    size_t c0 = ite + 5;
-    while (c0 < a.size() && isspace((unsigned char)a[c0]))
-      c0++;
-    if (a[c0] != '(')
-      continue;
-    size_t c1 = match_paren(a, c0);
-    if (c1 == string::npos)
-      continue;
-    size_t t0 = c1 + 1;
-    while (t0 < a.size() && isspace((unsigned char)a[t0]))
-      t0++;
-    if (a.compare(t0, zero.size(), zero) != 0)
-      continue;
-
-    string cond = a.substr(c0, c1 - c0 + 1);
-    set<uint64_t> ks;
-    for (auto it = std::sregex_iterator(cond.begin(), cond.end(), k64);
-         it != std::sregex_iterator(); ++it)
-      ks.insert(std::stoull((*it)[1].str()));
-
-    for (auto &in : cfg.inputs) {
-      if (in.scalar)
-        continue;
-      uint64_t endEx = in.start + in.regionLen;
-      bool match = in.start == 0 ? (ks == set<uint64_t>{endEx})
-                                 : (ks == set<uint64_t>{in.start, endEx});
-      if (!match || initialized.count(in.region))
-        continue;
-      string arr =
-          "__in_" + in.region + (faulty ? "_faulty" : "_correct");
-      string repl = "(ite (bvult " + cell + " (_ bv" +
-                    to_string(in.start + in.active) + " 64)) (select " + arr +
-                    " " + cell + ") (_ bv0 8))";
-      a.replace(t0, zero.size(), repl);
-      initialized.insert(in.region);
-      P.inArray[in.region] = arr;
-      P.log.push_back("input '" + in.param + "' (" + in.region +
-                      "): zero-fill replaced by symbolic " + arr + " over [" +
-                      to_string(in.start) + ".." +
-                      to_string(in.start + in.active - 1) + "]");
-      changed = true;
-      break;
-    }
-  }
-  return changed;
-}
-
 inline PreparedTrace prepare_trace(const string &raw, const TraceLayout &L,
                                    const FuncConfig &cfg, bool faulty) {
   PreparedTrace P;
@@ -822,39 +826,130 @@ inline PreparedTrace prepare_trace(const string &raw, const TraceLayout &L,
                             " -- run llvmbmc with --memory-granularity 8");
   }
 
-  // ---- rewrite the driver prelude ----
+  // ---- make the driver's input buffers symbolic ----
+  // main() first initializes its buffers (mayo_memset, lowered by llvmbmc to
+  // a zero-filling lambda or to a chain of constant stores, then a few
+  // constant `store i8`s of the baked-in function_inputs values). That
+  // prelude is left as it is; the memory version it ends with, c_K, is
+  // renamed c_K__drv and redefined as
+  //   c_K = lambda cell. ite(cell in an input's active bytes,
+  //                          select(__in_<sfx>, cell), select(c_K__drv, cell))
+  // so the function body reads symbolic inputs, and everything else as the
+  // driver left it. Prelude asserts write memory from constants only: they
+  // mention no declared symbol but the previous and the new memory version,
+  // and select only at lambda-bound cells.
   static const std::regex scalarInit(
-      R"(^\(assert\s*\(=\s*bv_\S+\s+\(_ bv\d+ \d+\)\)\)$)");
-  static const std::regex constStore(
-      R"(^\(assert\s*\(=\s*(\S+)\s+\(store\s+(\S+)\s+\(_ bv(\d+) 64\)\s+\(_ bv\d+ 8\)\)\)\)$)");
-  set<string> initialized;
-  bool prelude = true;
-  size_t droppedStores = 0;
-  for (auto &a : asserts) {
-    if (!prelude)
-      continue;
+      R"(^\(assert\s*\(=\s*bv_\S+\s+(\(_ bv\d+ \d+\)|bv_\d+_nondet)\)\)$)");
+  static const std::regex memNum(R"(^c_(\d+)_Global_M_)");
+  auto tokens = [](const string &a) {
+    vector<string> t;
+    size_t i = 0;
+    while (i < a.size()) {
+      char c = a[i];
+      if (c == '(' || c == ')' || isspace((unsigned char)c)) {
+        i++;
+        continue;
+      }
+      size_t j = i;
+      while (j < a.size() && a[j] != '(' && a[j] != ')' &&
+             !isspace((unsigned char)a[j]))
+        j++;
+      t.push_back(a.substr(i, j - i));
+      i = j;
+    }
+    return t;
+  };
+  // Returns the memory version a driver-init assert defines, or "".
+  auto driver_mem_def = [&](const string &a) -> string {
+    vector<string> t = tokens(a);
+    string best;
+    long bestN = -1;
+    set<string> mems;
+    for (size_t k = 0; k < t.size(); k++) {
+      if (!P.symbols.count(t[k]))
+        continue;
+      std::smatch m;
+      if (!std::regex_search(t[k], m, memNum))
+        return ""; // reads a non-memory symbol: not driver init
+      mems.insert(t[k]);
+      long n = std::stol(m[1].str());
+      if (n > bestN) {
+        bestN = n;
+        best = t[k];
+      }
+    }
+    if (mems.size() != 2)
+      return "";
+    for (size_t p = a.find("(select "); p != string::npos;
+         p = a.find("(select ", p + 1)) {
+      vector<string> t2 = tokens(a.substr(p, 200));
+      // t2: select, memory, index...
+      if (t2.size() < 3 || P.symbols.count(t2[2]) || t2[2] == "_" ||
+          a.compare(p + 8 + t2[1].size(), 2, " (") == 0)
+        return ""; // a read at a constant/computed address: function body
+    }
+    return best;
+  };
+
+  long lastInit = -1;
+  string lastMem;
+  for (size_t k = 0; k < asserts.size(); k++) {
+    const string &a = asserts[k];
     if (second_token(a) == "true" && a.find('(', 1) == string::npos)
       continue; // `(assert true)`
     if (a.size() < 200 && std::regex_match(a, scalarInit))
-      continue; // initial value of a scalar global (e.g. the return anchor)
-    if (a.find("(lambda ((") != string::npos) {
-      rewrite_input_lambdas(a, cfg, faulty, initialized, P);
-      continue;
+      continue; // a scalar global's initial value / nondet link
+    string def = a.size() < 20000 ? driver_mem_def(a) : "";
+    if (def.empty())
+      break;
+    lastInit = (long)k;
+    lastMem = def;
+  }
+
+  bool needBufs = false;
+  for (auto &in : cfg.inputs)
+    needBufs |= !in.scalar && in.active > 0;
+  if (needBufs) {
+    if (lastInit < 0)
+      throw runtime_error(string("Could not find the driver's buffer "
+                                 "initialization at the start of the ") +
+                          (faulty ? "faulty" : "correct") +
+                          " trace, so the inputs cannot be made symbolic");
+    const string drv = lastMem + "__drv";
+    const string arr = string("__in_") + (faulty ? "faulty" : "correct");
+    // rename the definition: only its left-hand side carries lastMem
+    {
+      string &a = asserts[lastInit];
+      size_t p = a.rfind("(= " + lastMem + " ");
+      if (p == string::npos)
+        throw runtime_error("cannot locate the definition of " + lastMem);
+      a.replace(p + 3, lastMem.size(), drv);
     }
-    std::smatch m;
-    if (a.size() < 400 && std::regex_match(a, m, constStore)) {
-      uint64_t addr = std::stoull(m[3].str());
-      bool intoInput = false;
-      for (auto &in : cfg.inputs)
-        intoInput |= !in.scalar && addr >= in.start &&
-                     addr < in.start + in.regionLen;
-      if (intoInput) {
-        a = "(assert (= " + m[1].str() + " " + m[2].str() + "))";
-        droppedStores++;
-      }
-      continue;
+    string cond;
+    int nIn = 0;
+    for (auto &in : cfg.inputs) {
+      if (in.scalar || in.active == 0)
+        continue;
+      cond += " (and (bvule (_ bv" + to_string(in.start) +
+              " 64) __in_cell) (bvult __in_cell (_ bv" +
+              to_string(in.start + in.active) + " 64)))";
+      P.inArray[in.region] = arr;
+      P.log.push_back("input '" + in.param + "' (" + in.region +
+                      "): symbolic over [" + to_string(in.start) + ".." +
+                      to_string(in.start + in.active - 1) + "]");
+      nIn++;
     }
-    prelude = false;
+    if (nIn > 1)
+      cond = "(or" + cond + ")";
+    string over = "(assert (= " + lastMem +
+                  " (lambda ((__in_cell (_ BitVec 64))) (ite " + cond +
+                  " (select " + arr + " __in_cell) (select " + drv +
+                  " __in_cell)))))";
+    asserts.insert(asserts.begin() + lastInit + 1, over);
+    decls.push_back("(declare-fun " + drv + " () " + memSortTxt + ")");
+    P.symbols.insert(drv);
+    P.log.push_back("driver initialization ends at " + lastMem +
+                    "; input bytes overridden after it");
   }
   // Symbolic scalar arguments. fault_types/bmc_variant.h reads every
   // non-fixed scalar via __VERIFIER_nondet_iN (-> bv_<K>_nondet) and stores
@@ -963,23 +1058,16 @@ inline PreparedTrace prepare_trace(const string &raw, const TraceLayout &L,
                       "value): shared by all copies as part of p");
     }
   }
-  if (droppedStores)
-    P.log.push_back("dropped " + to_string(droppedStores) +
-                    " constant driver store(s) into input regions");
-  for (auto &in : cfg.inputs)
-    if (!in.scalar && in.active > 0 && !initialized.count(in.region))
-      throw runtime_error(
-          "Could not find the driver's zero-fill (mayo_memset lambda) for "
-          "input region '" +
-          in.region + "' in the " + (faulty ? "faulty" : "correct") +
-          " trace, so it cannot be made symbolic");
 
   std::ostringstream o;
   for (auto &d : decls)
     o << d << "\n";
-  for (auto &kv : P.inArray) {
-    o << "(declare-fun " << kv.second << " () " << memSortTxt << ")\n";
-    P.symbols.insert(kv.second);
+  set<string> arrays;
+  for (auto &kv : P.inArray)
+    arrays.insert(kv.second);
+  for (auto &a : arrays) {
+    o << "(declare-fun " << a << " () " << memSortTxt << ")\n";
+    P.symbols.insert(a);
   }
   for (auto &a : asserts)
     o << a << "\n";
@@ -1252,6 +1340,7 @@ struct Options {
   unsigned jobs = 16;
   unsigned timeoutMs = 30000;    // per solver check
   unsigned faultTimeoutS = 300; // per faulty trace, 0 = unlimited
+  long long memLimitMb = -1;    // Z3 hard cap; -1 = 60% of MemAvailable
   bool verbose = false;
 };
 
@@ -1261,6 +1350,8 @@ inline string usage(const string &prog) {
          "       [--fault SUBSTR] [--positions N] [--field-mod N] [--jobs N]\n"
          "       [--timeout MS (per check, default 30000)]\n"
          "       [--fault-timeout S (per faulty trace, default 300, 0 = none)]\n"
+         "       [--mem-limit MB (all solvers together; default 60% of free "
+         "memory, 0 = none)]\n"
          "       [--test-dir DIR] [--mayo-json PATH] "
          "[--verbose]\n"
          "  secret-buf / eph_secret / fixed-scalars come from mayo.json,\n"
@@ -1295,6 +1386,8 @@ inline Options parse_options(int argc, char **argv) {
       o.jobs = (unsigned)std::stoul(val());
     else if (a == "--timeout")
       o.timeoutMs = (unsigned)std::stoul(val());
+    else if (a == "--mem-limit")
+      o.memLimitMb = std::stoll(val());
     else if (a == "--fault-timeout")
       o.faultTimeoutS = (unsigned)std::stoul(val());
     else if (a == "--test-dir")
@@ -1311,6 +1404,25 @@ inline Options parse_options(int argc, char **argv) {
     throw runtime_error("--field-mod must be in [2, 256]");
   if (o.jobs == 0)
     o.jobs = 1;
+
+  // Hard cap on Z3's memory, shared by every solver of the process: beyond
+  // it a check fails with "out of memory" (reported as UNKNOWN / a failed
+  // fault) instead of the kernel's OOM killer taking down the session.
+  if (o.memLimitMb < 0)
+    o.memLimitMb = (long long)(mem_available_mb() * 6 / 10);
+  if (o.memLimitMb > 0) {
+    z3::set_param("memory_max_size", (int)o.memLimitMb);
+    // Z3's own cap is approximate and does not see the trace text copies, so
+    // the address space of the whole process is capped too (+2 GB for thread
+    // stacks and allocator arenas): past it allocations fail inside this
+    // process -- reported as "out of memory" -- and nothing else is hit.
+    rlim_t bytes = (rlim_t)(o.memLimitMb + 2048) << 20;
+    struct rlimit rl {bytes, bytes};
+    setrlimit(RLIMIT_AS, &rl);
+    g_memLimitMb() = (size_t)o.memLimitMb;
+    std::cout << "[i] memory limit: " << o.memLimitMb
+              << " MB for the solvers (--mem-limit)\n";
+  }
   return o;
 }
 
@@ -1347,8 +1459,10 @@ inline FunctionSetup load_function(const Options &opts) {
   string raw = read_file(correctPath);
   TraceLayout L = parse_trace_layout(raw);
   S.layout = L;
+  vector<string> drv =
+      driver_allocas((fs::path(S.fnDir) / (opts.fn + ".ll")).string());
   S.cfg = resolve_config(opts.fn, opts.mayoJson, witnessPath, activePath, L,
-                         opts.secretBuf, opts.secretPos, opts.fieldMod);
+                         opts.secretBuf, opts.secretPos, opts.fieldMod, drv);
   print_config(S.cfg, std::cout);
 
   S.correct = prepare_trace(raw, L, S.cfg, false);

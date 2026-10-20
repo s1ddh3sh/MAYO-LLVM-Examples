@@ -55,6 +55,12 @@ z3::expr nibble_delta(Instance &I, const PreparedTrace &C, const string &ct,
 void stage1_for_secret(const FunctionSetup &S, const FaultJob &J, Budget &B,
                        unsigned s, vector<vector<PosFlags>> &flags) {
   const FuncConfig &cfg = S.cfg;
+  for (size_t oi = 0; oi < S.outputs.size(); oi++)
+    flags[oi].assign(num_positions(S, S.outputs[oi]), PosFlags{});
+  if (B.exhausted()) { // building the instance alone can take long
+    B.skipped++;
+    return;
+  }
   Instance I(cfg, B);
   I.add_trace(S.correct, "C");
   I.add_trace(J.trace, "F");
@@ -113,6 +119,10 @@ z3::check_result stage2_check(const FunctionSetup &S, const FaultJob &J,
                               Budget &B, const OutputBuf &o, uint64_t pos,
                               const vector<int> &copies, bool wantIneff,
                               string &counterexample) {
+  if (B.exhausted()) {
+    B.skipped++;
+    return z3::unknown;
+  }
   Instance I(S.cfg, B);
   z3::expr zero = I.ctx.bv_val(0, 4);
   for (int s : copies) {
